@@ -169,11 +169,11 @@ func (s *LocalStore) Open(id string, password string) (*Entry, error) {
 		return nil, ErrNotFound
 	}
 
-	if isExpired(meta, time.Now().UTC()) {
+	if isExpired(meta, time.Now().UTC(), s.TTL) {
 		l.mu.RUnlock()
 		l.mu.Lock()
 		metaDouble, errDouble := s.readMetadata(id)
-		if errDouble == nil && isExpired(metaDouble, time.Now().UTC()) {
+		if errDouble == nil && isExpired(metaDouble, time.Now().UTC(), s.TTL) {
 			_ = os.Remove(path)
 			_ = os.Remove(metaPath(path))
 		}
@@ -269,7 +269,7 @@ func (s *LocalStore) CleanupExpired() error {
 		l.mu.Lock()
 
 		meta, err := s.readMetadata(name)
-		if err == nil && isExpired(meta, now) {
+		if err == nil && isExpired(meta, now, s.TTL) {
 			path := s.path(name)
 			_ = os.Remove(path)
 			_ = os.Remove(metaPath(path))
@@ -313,7 +313,7 @@ func (s *LocalStore) List() ([]Metadata, error) {
 			l.mu.RUnlock()
 			release()
 
-			if err == nil && !isExpired(meta, now) {
+			if err == nil && !isExpired(meta, now, s.TTL) {
 				list = append(list, meta)
 			}
 		}
@@ -624,7 +624,7 @@ func (s *DBStore) Open(id string, password string) (*Entry, error) {
 		meta.ExpiresAt = expiresAtNull.Time
 	}
 
-	if isExpired(meta, time.Now().UTC()) {
+	if isExpired(meta, time.Now().UTC(), s.TTL) {
 		_, _ = s.db.Exec("DELETE FROM pastes WHERE id = ?", id)
 		return nil, ErrNotFound
 	}
@@ -674,7 +674,14 @@ func (s *DBStore) Delete(id string, token string) error {
 }
 
 func (s *DBStore) CleanupExpired() error {
-	_, err := s.db.Exec("DELETE FROM pastes WHERE expires_at IS NOT NULL AND expires_at < ?", time.Now().UTC())
+	now := time.Now().UTC()
+	cutoff := now.Add(-s.TTL)
+	_, err := s.db.Exec(`
+		DELETE FROM pastes 
+		WHERE (expires_at IS NOT NULL AND expires_at < ?)
+		   OR (expires_at IS NULL AND created_at < ?)
+		   OR (data_policy = 'permanent' AND created_at < ?)`, 
+		now, cutoff, cutoff)
 	return err
 }
 
@@ -686,13 +693,16 @@ func (s *DBStore) Close() error {
 }
 
 func (s *DBStore) List() ([]Metadata, error) {
+	now := time.Now().UTC()
+	cutoff := now.Add(-s.TTL)
 	query := `
 	SELECT id, password_hash, delete_token_hash, created_at, expires_at, data_policy, size, content_type
 	FROM pastes
-	WHERE expires_at IS NULL OR expires_at >= ?
+	WHERE (expires_at IS NOT NULL AND expires_at >= ?)
+	   OR (expires_at IS NULL AND created_at >= ?)
 	ORDER BY created_at DESC`
 
-	rows, err := s.db.Query(query, time.Now().UTC())
+	rows, err := s.db.Query(query, now, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -864,16 +874,13 @@ func (lm *lockManager) acquire(key string) (*keyLock, func()) {
 	}
 }
 
-func isExpired(meta Metadata, now time.Time) bool {
-	if strings.EqualFold(meta.DataPolicy, "permanent") {
-		return false
+func isExpired(meta Metadata, now time.Time, ttl time.Duration) bool {
+	expiresAt := meta.ExpiresAt
+	if expiresAt.IsZero() || strings.EqualFold(meta.DataPolicy, "permanent") {
+		expiresAt = meta.CreatedAt.Add(ttl)
 	}
 
-	if meta.ExpiresAt.IsZero() {
-		return false
-	}
-
-	return now.After(meta.ExpiresAt)
+	return now.After(expiresAt)
 }
 
 func validID(id string) bool {

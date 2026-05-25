@@ -93,6 +93,7 @@ type app struct {
 	store      pastebox.Storage
 	index      *template.Template
 	adminToken string
+	expireDays int
 }
 
 func main() {
@@ -165,6 +166,7 @@ func main() {
 		store:      store,
 		index:      indexTemplate,
 		adminToken: adminToken,
+		expireDays: expireDays,
 	}
 
 	go func() {
@@ -631,19 +633,56 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
             background-color: rgba(255, 255, 255, 0.85);
         }
 
-        pre {
+        .viewer-container {
+            display: flex;
             background-color: #242424;
             border-radius: 10px;
-            padding: 20px;
-            text-align: left;
+            border: 1px solid rgba(84, 84, 88, 0.2);
+            overflow: hidden;
+            height: 70vh;
             font-family: ui-monospace, SFMono-Regular, SF Pro Icons, "SF Mono", Menlo, Monaco, Consolas, monospace;
             font-size: 14px;
-            line-height: 1.6;
+            line-height: 22px; /* Fixed line height */
+            position: relative;
+        }
+
+        .line-numbers {
+            padding: 20px 10px 20px 20px;
+            background-color: #1e1e1e;
+            color: #858585;
+            text-align: right;
+            user-select: none;
+            border-right: 1px solid rgba(84, 84, 88, 0.2);
+            display: flex;
+            flex-direction: column;
+            width: 60px;
+            box-sizing: border-box;
+            overflow: hidden;
+            white-space: pre;
+        }
+
+        .code-area {
+            flex: 1;
+            overflow: auto;
+            position: relative;
+            height: 100%;
+        }
+
+        .spacer {
+            width: 1px;
+        }
+
+        .content-viewport {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 20px;
             color: #ffffff;
-            overflow-x: auto;
-            white-space: pre-wrap;
-            word-break: break-all;
-            border: 1px solid rgba(84, 84, 88, 0.2);
+            white-space: pre;
+            pointer-events: auto;
+            tab-size: 4;
+            -moz-tab-size: 4;
         }
 
         .footer-text {
@@ -708,14 +747,66 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
                     <a class="button" href="?raw=1">원본</a>
                 </div>
             </div>
-            <pre id="pasteContent">{{ .Content }}</pre>
+            <div class="viewer-container" id="viewerContainer">
+                <div class="line-numbers" id="lineNumbers"></div>
+                <div class="code-area" id="codeArea">
+                    <div class="spacer" id="spacer"></div>
+                    <div class="content-viewport" id="contentViewport"></div>
+                </div>
+            </div>
+            <script id="pasteData" type="text/plain">{{ .Content }}</script>
         </div>
     </main>
 
     <script>
+        const rawDataEl = document.getElementById('pasteData');
+        const rawText = rawDataEl.textContent;
+        const lines = rawText.split('\n');
+
+        const container = document.getElementById('viewerContainer');
+        const codeArea = document.getElementById('codeArea');
+        const spacer = document.getElementById('spacer');
+        const viewport = document.getElementById('contentViewport');
+        const lineNumbersDiv = document.getElementById('lineNumbers');
+
+        const lineHeight = 22;
+        const paddingTop = 20;
+        const paddingBottom = 20;
+
+        const totalHeight = lines.length * lineHeight + paddingTop + paddingBottom;
+        spacer.style.height = totalHeight + 'px';
+
+        function render() {
+            const scrollTop = codeArea.scrollTop;
+            const containerHeight = codeArea.clientHeight;
+
+            let startIdx = Math.floor((scrollTop - paddingTop) / lineHeight) - 5;
+            let endIdx = Math.ceil((scrollTop - paddingTop + containerHeight) / lineHeight) + 5;
+
+            if (startIdx < 0) startIdx = 0;
+            if (endIdx > lines.length) endIdx = lines.length;
+
+            const visibleLines = lines.slice(startIdx, endIdx);
+            viewport.textContent = visibleLines.join('\n');
+            
+            const offsetTop = paddingTop + startIdx * lineHeight;
+            viewport.style.transform = "translate3d(0, " + offsetTop + "px, 0)";
+
+            let numStr = '';
+            for (let i = startIdx + 1; i <= endIdx; i++) {
+                numStr += i + '\n';
+            }
+            lineNumbersDiv.textContent = numStr;
+            lineNumbersDiv.style.transform = "translate3d(0, " + (offsetTop - scrollTop) + "px, 0)";
+        }
+
+        codeArea.addEventListener('scroll', render);
+        window.addEventListener('resize', render);
+        render();
+
         async function copyPasteContent() {
             const button = document.getElementById("copyButton");
-            const content = document.getElementById("pasteContent").innerText;
+            const content = rawText;
 
             try {
                 await navigator.clipboard.writeText(content);
@@ -1184,18 +1275,21 @@ func (a *app) adminHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tempCount int
-	for _, p := range pastes {
-		if p.DataPolicy != "permanent" {
-			tempCount++
+	// 기존 영구 저장 데이터가 있을 경우 화면 표시용 예상 만료일을 주입합니다.
+	for i := range pastes {
+		if pastes[i].ExpiresAt.IsZero() {
+			ttl := time.Duration(a.expireDays) * 24 * time.Hour
+			if ttl <= 0 {
+				ttl = 30 * 24 * time.Hour
+			}
+			pastes[i].ExpiresAt = pastes[i].CreatedAt.Add(ttl)
 		}
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = adminDashboardHTML.Execute(w, map[string]any{
-		"Pastes":         pastes,
-		"TemporaryCount": tempCount,
-		"StorageMode":    a.getStorageModeString(),
+		"Pastes":      pastes,
+		"StorageMode": a.getStorageModeString(),
 	})
 }
 
@@ -1371,7 +1465,7 @@ var adminDashboardHTML = template.Must(template.New("admin_dashboard").Parse(`<!
 
   <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
     <!-- 정보 카드 섹션 -->
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-8">
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 mb-8">
       <div class="rounded-2xl border border-zinc-900 bg-zinc-950/40 p-5 backdrop-blur-sm">
         <p class="text-xs font-medium text-zinc-500 uppercase tracking-wider">스토리지 상태</p>
         <p class="mt-2 text-2xl font-bold tracking-tight text-white uppercase">{{ .StorageMode }} Mode</p>
@@ -1379,10 +1473,6 @@ var adminDashboardHTML = template.Must(template.New("admin_dashboard").Parse(`<!
       <div class="rounded-2xl border border-zinc-900 bg-zinc-950/40 p-5 backdrop-blur-sm">
         <p class="text-xs font-medium text-zinc-500 uppercase tracking-wider">전체 Paste 개수</p>
         <p class="mt-2 text-2xl font-bold tracking-tight text-white">{{ len .Pastes }}개</p>
-      </div>
-      <div class="rounded-2xl border border-zinc-900 bg-zinc-950/40 p-5 backdrop-blur-sm">
-        <p class="text-xs font-medium text-zinc-500 uppercase tracking-wider">총 만료 대기</p>
-        <p class="mt-2 text-2xl font-bold tracking-tight text-white">{{ .TemporaryCount }}개</p>
       </div>
     </div>
 
@@ -1405,7 +1495,7 @@ var adminDashboardHTML = template.Must(template.New("admin_dashboard").Parse(`<!
         </button>
       </div>
       <div class="text-xs text-zinc-500">
-        * 영구 보관 데이터를 포함하여 즉시 파기 가능합니다.
+        * 모든 저장 데이터는 즉시 파기 가능합니다.
       </div>
     </div>
 
@@ -1426,7 +1516,6 @@ var adminDashboardHTML = template.Must(template.New("admin_dashboard").Parse(`<!
               <th scope="col" class="px-6 py-4">ID / 링크</th>
               <th scope="col" class="px-6 py-4">콘텐츠 타입</th>
               <th scope="col" class="px-6 py-4">파일 크기</th>
-              <th scope="col" class="px-6 py-4">보관 정책</th>
               <th scope="col" class="px-6 py-4">생성일</th>
               <th scope="col" class="px-6 py-4">만료일</th>
             </tr>
@@ -1450,17 +1539,6 @@ var adminDashboardHTML = template.Must(template.New("admin_dashboard").Parse(`<!
               </td>
               <td class="px-6 py-4 text-xs text-zinc-400">{{ .ContentType }}</td>
               <td class="px-6 py-4 text-xs">{{ .Size }} Bytes</td>
-              <td class="px-6 py-4 text-xs">
-                {{ if eq .DataPolicy "permanent" }}
-                <span class="inline-flex items-center rounded-full bg-purple-500/10 border border-purple-500/20 px-2 py-0.5 text-[10px] font-medium text-purple-400 uppercase">
-                  영구
-                </span>
-                {{ else }}
-                <span class="inline-flex items-center rounded-full bg-zinc-500/10 border border-zinc-800 px-2 py-0.5 text-[10px] font-medium text-zinc-400 uppercase">
-                  임시
-                </span>
-                {{ end }}
-              </td>
               <td class="px-6 py-4 text-xs text-zinc-500">{{ .CreatedAt.Local.Format "2006-01-02 15:04:05" }}</td>
               <td class="px-6 py-4 text-xs text-zinc-500">
                 {{ if .ExpiresAt.IsZero }}
@@ -1558,7 +1636,7 @@ var adminDashboardHTML = template.Must(template.New("admin_dashboard").Parse(`<!
     function confirmDeleteAll() {
       showModal(
         '서버의 모든 Paste를 삭제합니까?',
-        '경고: 영구 보관 처리된 파일을 포함한 모든 업로드 데이터가 완전히 영구 파기됩니다. 이 작업은 되돌릴 수 없습니다.',
+        '경고: 모든 업로드 데이터가 완전히 영구 파기됩니다. 이 작업은 되돌릴 수 없습니다.',
         function() {
           const form = document.getElementById('actionForm');
           form.action = '/ra/delete-all';
