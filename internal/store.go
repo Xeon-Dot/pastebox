@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	ErrNotFound        = errors.New("not found")
-	ErrInvalidPassword = errors.New("invalid password")
+	ErrNotFound           = errors.New("not found")
+	ErrInvalidPassword    = errors.New("invalid password")
+	ErrInvalidDeleteToken = errors.New("invalid delete token")
 )
 
 type Store struct {
@@ -24,13 +25,14 @@ type Store struct {
 }
 
 type Metadata struct {
-	ID           string    `json:"id"`
-	PasswordHash string    `json:"password_hash,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	ExpiresAt    time.Time `json:"expires_at,omitempty"`
-	DataPolicy   string    `json:"data_policy,omitempty"`
-	Size         int64     `json:"size"`
-	ContentType  string    `json:"content_type"`
+	ID              string    `json:"id"`
+	PasswordHash    string    `json:"password_hash,omitempty"`
+	DeleteTokenHash string    `json:"delete_token_hash,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	ExpiresAt       time.Time `json:"expires_at,omitempty"`
+	DataPolicy      string    `json:"data_policy,omitempty"`
+	Size            int64     `json:"size"`
+	ContentType     string    `json:"content_type"`
 }
 
 type Entry struct {
@@ -49,15 +51,15 @@ func NewStore(dataDir string, ttl time.Duration) (*Store, error) {
 	}, nil
 }
 
-func (s *Store) Create(r io.Reader, contentType string, usePassword bool, permanent bool) (Metadata, string, error) {
+func (s *Store) Create(r io.Reader, contentType string, usePassword bool, permanent bool) (Metadata, string, string, error) {
 	id, path, err := s.reservePath()
 	if err != nil {
-		return Metadata{}, "", err
+		return Metadata{}, "", "", err
 	}
 
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
-		return Metadata{}, "", err
+		return Metadata{}, "", "", err
 	}
 
 	size, copyErr := io.Copy(file, r)
@@ -65,12 +67,12 @@ func (s *Store) Create(r io.Reader, contentType string, usePassword bool, perman
 
 	if copyErr != nil {
 		_ = os.Remove(path)
-		return Metadata{}, "", copyErr
+		return Metadata{}, "", "", copyErr
 	}
 
 	if closeErr != nil {
 		_ = os.Remove(path)
-		return Metadata{}, "", closeErr
+		return Metadata{}, "", "", closeErr
 	}
 
 	var password string
@@ -80,9 +82,15 @@ func (s *Store) Create(r io.Reader, contentType string, usePassword bool, perman
 		password, err = generatePassword(8)
 		if err != nil {
 			_ = os.Remove(path)
-			return Metadata{}, "", err
+			return Metadata{}, "", "", err
 		}
-		passwordHash = hashPassword(password)
+		passwordHash = hashSecret(password)
+	}
+
+	deleteToken, err := randomString(tokenAlphabet, 32)
+	if err != nil {
+		_ = os.Remove(path)
+		return Metadata{}, "", "", err
 	}
 
 	now := time.Now().UTC()
@@ -96,21 +104,22 @@ func (s *Store) Create(r io.Reader, contentType string, usePassword bool, perman
 	}
 
 	meta := Metadata{
-		ID:           id,
-		PasswordHash: passwordHash,
-		CreatedAt:    now,
-		ExpiresAt:    expiresAt,
-		DataPolicy:   dataPolicy,
-		Size:         size,
-		ContentType:  contentType,
+		ID:              id,
+		PasswordHash:    passwordHash,
+		DeleteTokenHash: hashSecret(deleteToken),
+		CreatedAt:       now,
+		ExpiresAt:       expiresAt,
+		DataPolicy:      dataPolicy,
+		Size:            size,
+		ContentType:     contentType,
 	}
 
 	if err := s.writeMetadata(meta); err != nil {
 		_ = os.Remove(path)
-		return Metadata{}, "", err
+		return Metadata{}, "", "", err
 	}
 
-	return meta, password, nil
+	return meta, password, deleteToken, nil
 }
 
 func (s *Store) Open(id string, password string) (*Entry, error) {
@@ -132,7 +141,7 @@ func (s *Store) Open(id string, password string) (*Entry, error) {
 	}
 
 	if meta.PasswordHash != "" {
-		if strings.TrimSpace(password) == "" || hashPassword(password) != meta.PasswordHash {
+		if strings.TrimSpace(password) == "" || hashSecret(password) != meta.PasswordHash {
 			return nil, ErrInvalidPassword
 		}
 	}
@@ -146,6 +155,41 @@ func (s *Store) Open(id string, password string) (*Entry, error) {
 		Meta: meta,
 		File: file,
 	}, nil
+}
+
+func (s *Store) Delete(id string, token string) error {
+	if !validID(id) {
+		return ErrNotFound
+	}
+
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ErrInvalidDeleteToken
+	}
+
+	path := s.path(id)
+
+	meta, err := s.readMetadata(id)
+	if err != nil {
+		return ErrNotFound
+	}
+
+	if meta.DeleteTokenHash == "" || hashSecret(token) != meta.DeleteTokenHash {
+		return ErrInvalidDeleteToken
+	}
+
+	fileErr := os.Remove(path)
+	metaErr := os.Remove(metaPath(path))
+
+	if fileErr != nil && !errors.Is(fileErr, os.ErrNotExist) {
+		return fileErr
+	}
+
+	if metaErr != nil && !errors.Is(metaErr, os.ErrNotExist) {
+		return metaErr
+	}
+
+	return nil
 }
 
 func (s *Store) CleanupExpired() error {
@@ -273,8 +317,8 @@ func validID(id string) bool {
 	return true
 }
 
-func hashPassword(password string) string {
-	sum := sha256.Sum256([]byte(password))
+func hashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -386,3 +430,4 @@ func shuffleBytes(data []byte) error {
 }
 
 const idAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+const tokenAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"

@@ -90,6 +90,11 @@ func (a *app) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if token := r.URL.Query().Get("delete"); token != "" {
+		a.deleteHandler(w, r, id, token)
+		return
+	}
+
 	a.viewHandler(w, r, id)
 }
 
@@ -141,7 +146,7 @@ func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	usePassword := strings.EqualFold(strings.TrimSpace(r.Header.Get("usepassword")), "true")
 	permanent := strings.EqualFold(strings.TrimSpace(r.Header.Get("data-policy")), "permanent")
 
-	meta, password, err := a.store.Create(reader, contentType, usePassword, permanent)
+	meta, password, deleteToken, err := a.store.Create(reader, contentType, usePassword, permanent)
 	if err != nil {
 		log.Printf("upload failed: %v", err)
 		http.Error(w, "upload failed", http.StatusInternalServerError)
@@ -152,12 +157,40 @@ func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
+	fmt.Fprintf(w, "url: %s\n", url)
+
+	if !strings.EqualFold(meta.DataPolicy, "permanent") && !meta.ExpiresAt.IsZero() {
+		fmt.Fprintf(w, "expires: %s\n", meta.ExpiresAt.Format(time.RFC3339))
+	}
+
 	if password != "" {
-		fmt.Fprintf(w, "%s\npassword: %s\n", url, password)
+		fmt.Fprintf(w, "password: %s\n", password)
+	}
+
+	fmt.Fprintf(w, "delete: %s?delete=%s\n", url, deleteToken)
+}
+
+func (a *app) deleteHandler(w http.ResponseWriter, r *http.Request, id string, token string) {
+	if r.Method == http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	fmt.Fprintln(w, url)
+	if err := a.store.Delete(id, token); err != nil {
+		if errors.Is(err, pastebox.ErrInvalidDeleteToken) {
+			log.Printf("delete denied: id=%s remote=%s", id, r.RemoteAddr)
+			http.Error(w, "delete token required or invalid", http.StatusUnauthorized)
+			return
+		}
+
+		http.NotFound(w, r)
+		return
+	}
+
+	log.Printf("deleted: id=%s remote=%s", id, r.RemoteAddr)
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintln(w, "deleted")
 }
 
 func (a *app) viewHandler(w http.ResponseWriter, r *http.Request, id string) {
@@ -347,10 +380,47 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!doctype html>
   <main class="mx-auto max-w-5xl px-4 py-8">
     <div class="mb-4 flex items-center justify-between gap-4">
       <h1 class="text-lg font-semibold text-gray-100">Pastebox / {{ .ID }}</h1>
-      <a class="rounded-xl border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-900" href="?raw=1">Raw</a>
+      <div class="flex items-center gap-2">
+        <button
+          id="copyButton"
+          type="button"
+          class="rounded-xl border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-900"
+          onclick="copyPasteContent()"
+        >
+          Copy
+        </button>
+        <a class="rounded-xl border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-900" href="?raw=1">Raw</a>
+      </div>
     </div>
-    <pre class="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-gray-800 bg-[#111111] p-5 text-sm leading-6 text-gray-200">{{ .Content }}</pre>
+    <pre id="pasteContent" class="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-gray-800 bg-[#111111] p-5 text-sm leading-6 text-gray-200">{{ .Content }}</pre>
   </main>
+
+  <script>
+    async function copyPasteContent() {
+      const button = document.getElementById("copyButton");
+      const content = document.getElementById("pasteContent").innerText;
+
+      try {
+        await navigator.clipboard.writeText(content);
+        button.innerText = "Copied";
+      } catch (error) {
+        const textarea = document.createElement("textarea");
+        textarea.value = content;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+        button.innerText = "Copied";
+      }
+
+      setTimeout(() => {
+        button.innerText = "Copy";
+      }, 1500);
+    }
+  </script>
 </body>
 </html>`))
 
