@@ -12,3 +12,4 @@ services:
       TZ: "Asia/Seoul"
     volumes:
       - ./data:/paste-data
+      - ./config.conf:/app/config.conf
