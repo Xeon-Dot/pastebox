@@ -55,6 +55,9 @@ DB_DSN=root:password@tcp(127.0.0.1:3306)/pastebox?parseTime=true
 
 # [DB Mode Only] Compression algorithm (zstd, gzip, or none)
 DB_COMPRESSION_ALGORITHM=zstd
+
+# [Optional] Administrator master token for login (If blank, a random 256-character token will be automatically generated and saved on startup)
+ADMIN_TOKEN=
 ```
 
 ---
@@ -70,17 +73,34 @@ DB_COMPRESSION_ALGORITHM=zstd
    echo "hello" | curl -X POST --data-binary @- http://localhost:8080/
    ```
 
-3. **File Upload**: Supports file uploads using the `multipart/form-data` format.
+3. **Command Output Upload**: Supports uploading stdout of commands directly by piping to `curl` (e.g. server logs, system info like `ifconfig`, `df -h`).
+   ```bash
+   ifconfig | curl -X POST --data-binary @- http://localhost:8080/
+   ```
+
+4. **File Upload**: Supports file uploads using the `multipart/form-data` format.
    ```bash
    curl -F "file=@test.txt" http://localhost:8080/
    ```
 
-4. **Permanent Storage**: Supports permanent file storage using the `data-policy: permanent` header.
+5. **Permanent Storage**: Supports permanent file storage using the `data-policy: permanent` header.
    ```bash
    curl -H "data-policy: permanent" -F "file=@test.txt" http://localhost:8080/
    ```
+   ```json
+   // Path : ./data/code.json
 
-5. **Password-Protected Links**: Supports private upload links using the `usepassword: true` header.
+   {
+     "id": "code",
+     "created_at": "2026-05-25T06:46:51.108540924Z",
+     "expires_at": "0001-01-01T00:00:00Z",
+     "data_policy": "permanent",
+     "size": 5,
+     "content_type": "application/octet-stream"
+   }
+   ```
+
+6. **Password-Protected Links**: Supports private upload links using the `usepassword: true` header.
 
    When enabled, an 8-character password containing uppercase/lowercase letters, numbers, and special characters is automatically generated. Files can be accessed using either the `?password=...` query parameter or the `paste-password: ...` header.
    ```bash
@@ -98,9 +118,14 @@ DB_COMPRESSION_ALGORITHM=zstd
    ![](./preview2.png)
    ![](./preview3.png)
 
-6. **High-Performance Compression Pipeline (DB Mode)**:
+7. **High-Performance Compression Pipeline (DB Mode)**:
    - When database mode is active, uploaded data is compressed (`zstd` or `gzip`) in Go memory before hitting the DB blob storage.
    - This saves up to 90% of disk space and minimizes disk I/O and network bandwidth, resulting in significantly faster response times under massive download traffic.
+
+8. **Admin Dashboard (`/ra`)**:
+   - Provides a responsive admin dashboard at `/ra` to monitor and manage all uploaded pastes in the browser.
+   - Access is authenticated via the `ADMIN_TOKEN` cookie. Supports **Delete Selected** and **Delete All** operations.
+   - If `ADMIN_TOKEN` is blank in `config.conf` on startup, it dynamically generates a 256-character alphanumeric master token and permanently saves it to the configuration file (which is printed in stdout logs for confirmation).
 
 ---
 

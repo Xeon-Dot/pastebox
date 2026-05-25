@@ -1,59 +1,350 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ko">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Pastebox</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = { darkMode: 'class' }
-  </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pastebox</title>
+    <style>
+        :root {
+            --focus-ring: #06b6d4;
+        }
+
+        html {
+            box-sizing: border-box;
+        }
+
+        *, *::before, *::after {
+            box-sizing: inherit;
+        }
+
+        html, body {
+            width: 100%;
+            overflow-x: hidden;
+        }
+
+        * {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+        }
+
+        body {
+            background: #1a1a1a;
+            color: #e5e5e5;
+            margin: 0;
+            padding: 0;
+            position: relative;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        :focus-visible {
+            outline: 3px solid var(--focus-ring);
+            outline-offset: 2px;
+        }
+
+        /* Navbar (ROKFOSS Main Style) */
+        .navbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            box-shadow: none !important;
+            border: none !important;
+            padding-bottom: 40px !important;
+            z-index: 1000;
+            background: linear-gradient( to bottom, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.65) 20%, rgba(0, 0, 0, 0.50) 40%, rgba(0, 0, 0, 0.35) 60%, rgba(0, 0, 0, 0.20) 75%, rgba(0, 0, 0, 0.10) 85%, rgba(0, 0, 0, 0.04) 93%, rgba(0, 0, 0, 0) 100% ) !important;
+            transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), background 0.4s ease;
+            padding: 23px !important;
+            transform: translateY(0);
+        }
+
+        .navbar .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: nowrap;
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 1rem;
+        }
+
+        .navbar-brand img {
+            height: 40px;
+        }
+
+        .main-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 140px 20px 80px;
+            box-sizing: border-box;
+        }
+
+        .content-wrapper {
+            max-width: 720px;
+            width: 100%;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 48px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            font-size: 20px;
+            color: #fff;
+            margin-bottom: 2rem;
+        }
+
+        .description {
+            font-size: 16px;
+            line-height: 1.5;
+            color: #e5e5e5;
+            margin-bottom: 2.5rem;
+        }
+
+        .info-section {
+            background-color: #242424;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 32px;
+            text-align: left;
+        }
+
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 0;
+            border-bottom: 0.5px solid rgba(84, 84, 88, 0.4);
+        }
+
+        .info-item:last-child {
+            border-bottom: none;
+            padding-bottom: 0;
+        }
+
+        .info-item:first-child {
+            padding-top: 0;
+        }
+
+        .info-label {
+            font-size: 15px;
+            line-height: 20px;
+            color: rgba(235, 235, 245, 0.6);
+            font-weight: 500;
+            flex-shrink: 0;
+            margin-right: 16px;
+        }
+
+        .info-value {
+            font-size: 14px;
+            line-height: 20px;
+            color: #ffffff;
+            font-weight: 400;
+            text-align: right;
+            font-family: ui-monospace, SFMono-Regular, SF Pro Icons, "SF Mono", Menlo, Monaco, Consolas, monospace;
+            word-break: break-all;
+            white-space: pre-wrap;
+            max-width: 75%;
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 24px;
+            margin-bottom: 32px;
+            justify-content: center;
+        }
+
+        .button {
+            background-color: #242424;
+            color: #ffffff;
+            border: 1px solid rgba(84, 84, 88, 0.4);
+            border-radius: 10px;
+            padding: 12px 24px;
+            font-size: 15px;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+            user-select: none;
+        }
+
+        .button:hover {
+            background-color: #2c2c2e;
+        }
+
+        .button:active {
+            transform: scale(0.98);
+        }
+
+        .button-primary {
+            background-color: #ffffff;
+            color: #000000;
+            border: none;
+        }
+
+        .button-primary:hover {
+            background-color: rgba(255, 255, 255, 0.85);
+        }
+
+        .footer-text {
+            font-size: 14px;
+            color: #aaa;
+            margin-top: 2rem;
+            text-align: center;
+        }
+
+        @media (max-width: 768px) {
+            .navbar {
+                padding: 12px 15px !important;
+            }
+
+            .navbar .container {
+                flex-direction: row;
+                align-items: center;
+                gap: 12px;
+            }
+
+            .navbar-brand img {
+                height: 28px;
+            }
+
+            .main-container {
+                padding-top: 120px;
+            }
+
+            .info-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 8px;
+                padding: 12px 0;
+            }
+
+            .info-label {
+                margin-right: 0;
+            }
+
+            .info-value {
+                text-align: left;
+                max-width: 100%;
+                width: 100%;
+                background: rgba(0, 0, 0, 0.25);
+                padding: 10px;
+                border-radius: 6px;
+                font-size: 13px;
+                white-space: nowrap;
+                overflow-x: auto;
+            }
+            
+            .actions {
+                flex-direction: column;
+            }
+            
+            .button {
+                width: 100%;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                animation: none !important;
+                transition: none !important;
+            }
+        }
+    </style>
 </head>
-<body class="dark min-h-screen bg-[#111111] text-zinc-100">
-  <main class="mx-auto flex min-h-screen max-w-3xl flex-col justify-center px-6 py-12">
-    <section class="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-8 shadow-2xl">
-      <div class="mb-8">
-        <p class="mb-3 inline-flex rounded-full border border-zinc-800 px-3 py-1 text-xs text-zinc-400">curl 기반 파일 공유 서비스</p>
-        <h1 class="text-4xl font-bold tracking-tight">Pastebox</h1>
-        <p class="mt-3 text-zinc-400">curl을 사용하여 파일이나 텍스트를 업로드하면 5자리의 무작위 URL이 생성됩니다. 생성된 링크는 30일 후에 자동으로 삭제됩니다.</p>
-      </div>
+<body>
+    <nav class="navbar">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <img data-cfasync="false" loading="eager" decoding="async" src="https://cdn.krfoss.org/web/ROKFOSS.png" alt="ROKFOSS">
+            </a>
+        </div>
+    </nav>
 
-      <div class="space-y-4">
-        <div class="rounded-xl bg-black/40 p-4 ring-1 ring-zinc-800">
-          <p class="mb-2 text-sm text-zinc-400">텍스트 업로드</p>
-          <pre class="overflow-x-auto text-sm"><code>echo "hello" | curl -X POST --data-binary @- {{ .BaseURL }}/</code></pre>
-        </div>
-        <div class="rounded-xl bg-black/40 p-4 ring-1 ring-zinc-800">
-          <p class="mb-2 text-sm text-zinc-400">파일 업로드</p>
-          <pre class="overflow-x-auto text-sm"><code>curl -F "file=@test.txt" {{ .BaseURL }}/</code></pre>
-        </div>
-        <div class="rounded-xl bg-black/40 p-4 ring-1 ring-zinc-800">
-          <p class="mb-2 text-sm text-zinc-400">비밀번호 보호 링크</p>
-          <pre class="overflow-x-auto text-sm"><code>curl -H "usepassword: true" -F "file=@secret.txt" {{ .BaseURL }}/</code></pre>
-        </div>
-        <div class="rounded-xl bg-black/40 p-4 ring-1 ring-zinc-800">
-          <p class="mb-2 text-sm text-zinc-400">영구 보관</p>
-          <pre class="overflow-x-auto text-sm"><code>curl -H "data-policy: permanent" -F "file=@server-logs.log" {{ .BaseURL }}/</code></pre>
-        </div>
-        <div class="rounded-xl bg-black/40 p-4 ring-1 ring-zinc-800">
-          <p class="mb-2 text-sm text-zinc-400">만료 정보</p>
-          <p class="mb-3 text-sm text-zinc-500">임시 업로드의 경우 업로드 응답에 만료일이 포함됩니다. 영구 업로드의 경우 만료일이 포함되지 않습니다.</p>
-          <pre class="overflow-x-auto text-sm"><code>주소: {{ .BaseURL }}/AbC12
+    <main id="main" class="main-container" tabindex="-1">
+        <div class="content-wrapper">
+            <h1>PASTEBOX</h1>
+            <p class="subtitle">curl 기반 파일 공유 서비스</p>
+            <p class="description">curl을 사용하여 파일이나 텍스트를 업로드하면 5자리의 무작위 URL이 생성됩니다. 생성된 임시 링크는 30일 후에 자동으로 삭제됩니다.</p>
+
+            <div class="info-section">
+                <div class="info-item">
+                    <span class="info-label">텍스트 업로드</span>
+                    <span class="info-value">echo "hello" | curl -X POST --data-binary @- {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">명령어 출력 업로드</span>
+                    <span class="info-value">ifconfig | curl -X POST --data-binary @- {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">파일 업로드</span>
+                    <span class="info-value">curl -F "file=@test.txt" {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">비밀번호 보호 링크</span>
+                    <span class="info-value">curl -H "usepassword: true" -F "file=@secret.txt" {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">영구 보관</span>
+                    <span class="info-value">curl -H "data-policy: permanent" -F "file=@server-logs.log" {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">만료 정보</span>
+                    <span class="info-value">주소: {{ .BaseURL }}/AbC12
 만료일: 2026-06-24T05:10:26Z
-삭제링크: {{ .BaseURL }}/AbC12?delete=DELETE_TOKEN</code></pre>
-        </div>
-        <div class="rounded-xl bg-black/40 p-4 ring-1 ring-zinc-800">
-          <p class="mb-2 text-sm text-zinc-400">수동 삭제</p>
-          <p class="mb-3 text-sm text-zinc-500">업로드할 때마다 삭제 URL이 반환됩니다. 해당 URL에 접속하거나 curl을 통해 요청을 보내면 업로드된 콘텐츠를 수동으로 삭제할 수 있습니다.</p>
-          <pre class="overflow-x-auto text-sm"><code>curl "{{ .BaseURL }}/AbC12?delete=DELETE_TOKEN"</code></pre>
-        </div>
-      </div>
+삭제링크: {{ .BaseURL }}/AbC12?delete=DELETE_TOKEN</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">수동 삭제</span>
+                    <span class="info-value">curl "{{ .BaseURL }}/AbC12?delete=DELETE_TOKEN"</span>
+                </div>
+            </div>
 
-      <div class="mt-8 flex flex-wrap gap-3">
-        <a class="rounded-xl bg-zinc-100 px-4 py-2 font-semibold text-zinc-950 transition hover:bg-white" href="/">홈</a>
-        <button class="rounded-xl border border-zinc-700 px-4 py-2 text-zinc-300 transition hover:border-zinc-500 hover:text-white" onclick="navigator.clipboard.writeText('curl -F &quot;file=@test.txt&quot; {{ .BaseURL }}/')">curl 예시 복사</button>
-      </div>
-    </section>
-  </main>
+            <div class="actions">
+                <a class="button button-primary" href="/">홈</a>
+                <button class="button" onclick="copyExample(this)">curl 예시 복사</button>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        function copyExample(btn) {
+            const text = 'curl -F "file=@test.txt" {{ .BaseURL }}/';
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = btn.innerText;
+                btn.innerText = "복사 완료";
+                setTimeout(() => {
+                    btn.innerText = originalText;
+                }, 1500);
+            }).catch(err => {
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.style.position = "fixed";
+                textarea.style.left = "-9999px";
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textarea);
+                
+                const originalText = btn.innerText;
+                btn.innerText = "복사 완료";
+                setTimeout(() => {
+                    btn.innerText = originalText;
+                }, 1500);
+            });
+        }
+    </script>
 </body>
 </html>

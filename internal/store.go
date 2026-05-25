@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,9 @@ type Storage interface {
 	Delete(id string, token string) error
 	CleanupExpired() error
 	Close() error
+	List() ([]Metadata, error)
+	ForceDelete(id string) error
+	DeleteAll() error
 }
 
 type Metadata struct {
@@ -284,6 +288,103 @@ func (s *LocalStore) CleanupExpired() error {
 }
 
 func (s *LocalStore) Close() error {
+	return nil
+}
+
+func (s *LocalStore) List() ([]Metadata, error) {
+	entries, err := os.ReadDir(s.DataDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var list []Metadata
+	now := time.Now().UTC()
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if strings.HasSuffix(name, ".json") {
+			id := strings.TrimSuffix(name, ".json")
+			if !validID(id) {
+				continue
+			}
+
+			l, release := s.lockMgr.acquire(id)
+			l.mu.RLock()
+			meta, err := s.readMetadata(id)
+			l.mu.RUnlock()
+			release()
+
+			if err == nil && !isExpired(meta, now) {
+				list = append(list, meta)
+			}
+		}
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].CreatedAt.After(list[j].CreatedAt)
+	})
+
+	return list, nil
+}
+
+func (s *LocalStore) ForceDelete(id string) error {
+	if !validID(id) {
+		return ErrNotFound
+	}
+
+	l, release := s.lockMgr.acquire(id)
+	l.mu.Lock()
+	defer func() {
+		l.mu.Unlock()
+		release()
+	}()
+
+	path := s.path(id)
+	fileErr := os.Remove(path)
+	metaErr := os.Remove(metaPath(path))
+
+	if fileErr != nil && !errors.Is(fileErr, os.ErrNotExist) {
+		return fileErr
+	}
+	if metaErr != nil && !errors.Is(metaErr, os.ErrNotExist) {
+		return metaErr
+	}
+
+	return nil
+}
+
+func (s *LocalStore) DeleteAll() error {
+	entries, err := os.ReadDir(s.DataDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		id := name
+		if strings.HasSuffix(name, ".json") {
+			id = strings.TrimSuffix(name, ".json")
+		}
+
+		if !validID(id) {
+			continue
+		}
+
+		l, release := s.lockMgr.acquire(id)
+		l.mu.Lock()
+		_ = os.Remove(s.path(id))
+		_ = os.Remove(metaPath(s.path(id)))
+		l.mu.Unlock()
+		release()
+	}
+
 	return nil
 }
 
@@ -591,6 +692,70 @@ func (s *DBStore) Close() error {
 		return s.db.Close()
 	}
 	return nil
+}
+
+func (s *DBStore) List() ([]Metadata, error) {
+	query := `
+	SELECT id, password_hash, delete_token_hash, created_at, expires_at, data_policy, size, content_type
+	FROM pastes
+	WHERE expires_at IS NULL OR expires_at >= ?
+	ORDER BY created_at DESC`
+
+	rows, err := s.db.Query(query, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []Metadata
+	for rows.Next() {
+		var meta Metadata
+		var dbPassHash sql.NullString
+		var expiresAtNull sql.NullTime
+
+		err := rows.Scan(
+			&meta.ID,
+			&dbPassHash,
+			&meta.DeleteTokenHash,
+			&meta.CreatedAt,
+			&expiresAtNull,
+			&meta.DataPolicy,
+			&meta.Size,
+			&meta.ContentType,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if dbPassHash.Valid {
+			meta.PasswordHash = dbPassHash.String
+		}
+		if expiresAtNull.Valid {
+			meta.ExpiresAt = expiresAtNull.Time
+		}
+
+		list = append(list, meta)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return list, nil
+}
+
+func (s *DBStore) ForceDelete(id string) error {
+	if !validID(id) {
+		return ErrNotFound
+	}
+
+	_, err := s.db.Exec("DELETE FROM pastes WHERE id = ?", id)
+	return err
+}
+
+func (s *DBStore) DeleteAll() error {
+	_, err := s.db.Exec("DELETE FROM pastes")
+	return err
 }
 
 // 압축 및 해제 보조 함수들

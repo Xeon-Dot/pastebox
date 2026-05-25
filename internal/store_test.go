@@ -144,3 +144,67 @@ func TestStoreConcurrency(t *testing.T) {
 	wg.Wait()
 	close(stopCleanup)
 }
+
+func TestStoreAdmin(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "pastebox-admin-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	store, err := NewLocalStore(tempDir, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	// 1. Create two pastes
+	meta1, _, _, err := store.Create(bytes.NewReader([]byte("paste 1")), "text/plain", false, false)
+	if err != nil {
+		t.Fatalf("failed to create entry 1: %v", err)
+	}
+	meta2, _, _, err := store.Create(bytes.NewReader([]byte("paste 2")), "text/plain", false, false)
+	if err != nil {
+		t.Fatalf("failed to create entry 2: %v", err)
+	}
+
+	// 2. List pastes and verify
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("failed to list pastes: %v", err)
+	}
+	if len(list) != 2 {
+		t.Errorf("expected 2 pastes, got %d", len(list))
+	}
+
+	// 3. ForceDelete one paste
+	err = store.ForceDelete(meta1.ID)
+	if err != nil {
+		t.Fatalf("failed to force delete paste 1: %v", err)
+	}
+
+	// Check listing again
+	list, err = store.List()
+	if err != nil {
+		t.Fatalf("failed to list pastes after delete: %v", err)
+	}
+	if len(list) != 1 {
+		t.Errorf("expected 1 paste, got %d", len(list))
+	}
+	if list[0].ID != meta2.ID {
+		t.Errorf("expected remaining paste to be %s, got %s", meta2.ID, list[0].ID)
+	}
+
+	// 4. DeleteAll pastes
+	err = store.DeleteAll()
+	if err != nil {
+		t.Fatalf("failed to delete all: %v", err)
+	}
+
+	list, err = store.List()
+	if err != nil {
+		t.Fatalf("failed to list pastes after delete all: %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("expected 0 pastes, got %d", len(list))
+	}
+}

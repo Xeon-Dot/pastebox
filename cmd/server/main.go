@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"log"
+	"math/big"
 	"mime"
 	"net/http"
 	"os"
@@ -27,6 +29,7 @@ type config struct {
 	ExpireDays  int
 	DBDSN       string
 	DBCompress  string
+	AdminToken  string
 }
 
 func loadConfig(path string) (*config, error) {
@@ -74,6 +77,8 @@ func loadConfig(path string) (*config, error) {
 			cfg.DBDSN = val
 		case "DB_COMPRESSION_ALGORITHM":
 			cfg.DBCompress = val
+		case "ADMIN_TOKEN":
+			cfg.AdminToken = val
 		}
 	}
 
@@ -85,8 +90,9 @@ func loadConfig(path string) (*config, error) {
 }
 
 type app struct {
-	store pastebox.Storage
-	index *template.Template
+	store      pastebox.Storage
+	index      *template.Template
+	adminToken string
 }
 
 func main() {
@@ -97,6 +103,7 @@ func main() {
 	storageMode := "local"
 	dbDSN := ""
 	dbCompress := "zstd"
+	adminToken := ""
 
 	// config.conf 로드 시도
 	cfg, err := loadConfig("config.conf")
@@ -117,6 +124,10 @@ func main() {
 		if cfg.DBCompress != "" {
 			dbCompress = cfg.DBCompress
 		}
+		if err := ensureAdminToken("config.conf", cfg); err != nil {
+			log.Printf("ADMIN_TOKEN 파일 기록 실패: %v", err)
+		}
+		adminToken = cfg.AdminToken
 		log.Println("설정 파일(config.conf)이 성공적으로 로드되었습니다.")
 	} else {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -145,14 +156,15 @@ func main() {
 	}
 	defer store.Close()
 
-	indexTemplate, err := template.ParseFiles("templates/index.html")
+		indexTemplate, err := template.ParseFiles("templates/index.html")
 	if err != nil {
 		indexTemplate = template.Must(template.New("index").Parse(fallbackIndexHTML))
 	}
 
 	a := &app{
-		store: store,
-		index: indexTemplate,
+		store:      store,
+		index:      indexTemplate,
+		adminToken: adminToken,
 	}
 
 	go func() {
@@ -169,6 +181,11 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handle)
+	mux.HandleFunc("/ra", a.adminHandler)
+	mux.HandleFunc("/ra/login", a.adminLoginHandler)
+	mux.HandleFunc("/ra/logout", a.adminLogoutHandler)
+	mux.HandleFunc("/ra/delete", a.adminDeleteHandler)
+	mux.HandleFunc("/ra/delete-all", a.adminDeleteAllHandler)
 
 	log.Printf("pastebox listening on %s", listenAddr)
 
@@ -476,98 +493,1098 @@ func getenvInt(key string, fallback int) int {
 	return n
 }
 
-var pasteViewHTML = template.Must(template.New("paste").Parse(`<!doctype html>
+var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ .ID }} - Pastebox</title>
+    <style>
+        :root {
+            --focus-ring: #06b6d4;
+        }
+
+        html {
+            box-sizing: border-box;
+        }
+
+        *, *::before, *::after {
+            box-sizing: inherit;
+        }
+
+        html, body {
+            width: 100%;
+            overflow-x: hidden;
+        }
+
+        * {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+        }
+
+        body {
+            background: #1a1a1a;
+            color: #e5e5e5;
+            margin: 0;
+            padding: 0;
+            position: relative;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Navbar (ROKFOSS Main Style) */
+        .navbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            z-index: 1000;
+            background: linear-gradient( to bottom, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.65) 20%, rgba(0, 0, 0, 0.50) 40%, rgba(0, 0, 0, 0.35) 60%, rgba(0, 0, 0, 0.20) 75%, rgba(0, 0, 0, 0.10) 85%, rgba(0, 0, 0, 0.04) 93%, rgba(0, 0, 0, 0) 100% ) !important;
+            padding: 23px !important;
+        }
+
+        .navbar .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 1rem;
+        }
+
+        .navbar-brand img {
+            height: 40px;
+        }
+
+        .main-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 140px 20px 80px;
+            box-sizing: border-box;
+        }
+
+        .content-wrapper {
+            max-width: 960px;
+            width: 100%;
+        }
+
+        .header-section {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #fff;
+            margin: 0;
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .button {
+            background-color: #242424;
+            color: #ffffff;
+            border: 1px solid rgba(84, 84, 88, 0.4);
+            border-radius: 10px;
+            padding: 10px 18px;
+            font-size: 14px;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+            user-select: none;
+        }
+
+        .button:hover {
+            background-color: #2c2c2e;
+        }
+
+        .button:active {
+            transform: scale(0.98);
+        }
+
+        .button-primary {
+            background-color: #ffffff;
+            color: #000000;
+            border: none;
+        }
+
+        .button-primary:hover {
+            background-color: rgba(255, 255, 255, 0.85);
+        }
+
+        pre {
+            background-color: #242424;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: left;
+            font-family: ui-monospace, SFMono-Regular, SF Pro Icons, "SF Mono", Menlo, Monaco, Consolas, monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            color: #ffffff;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            border: 1px solid rgba(84, 84, 88, 0.2);
+        }
+
+        .footer-text {
+            font-size: 14px;
+            color: #aaa;
+            margin-top: 2rem;
+            text-align: center;
+        }
+
+        @media (max-width: 768px) {
+            .navbar {
+                padding: 12px 15px !important;
+            }
+
+            .navbar-brand img {
+                height: 28px;
+            }
+
+            .main-container {
+                padding-top: 120px;
+            }
+
+            .header-section {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 16px;
+            }
+
+            .actions {
+                width: 100%;
+            }
+
+            .button {
+                flex: 1;
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <img data-cfasync="false" loading="eager" decoding="async" src="https://cdn.krfoss.org/web/ROKFOSS.png" alt="ROKFOSS">
+            </a>
+        </div>
+    </nav>
+
+    <main id="main" class="main-container" tabindex="-1">
+        <div class="content-wrapper">
+            <div class="header-section">
+                <h1>Pastebox / {{ .ID }}</h1>
+                <div class="actions">
+                    <button
+                        id="copyButton"
+                        type="button"
+                        class="button button-primary"
+                        onclick="copyPasteContent()"
+                    >
+                        복사
+                    </button>
+                    <a class="button" href="?raw=1">원본</a>
+                </div>
+            </div>
+            <pre id="pasteContent">{{ .Content }}</pre>
+        </div>
+    </main>
+
+    <script>
+        async function copyPasteContent() {
+            const button = document.getElementById("copyButton");
+            const content = document.getElementById("pasteContent").innerText;
+
+            try {
+                await navigator.clipboard.writeText(content);
+                button.innerText = "복사 완료";
+            } catch (error) {
+                const textarea = document.createElement("textarea");
+                textarea.value = content;
+                textarea.setAttribute("readonly", "");
+                textarea.style.position = "fixed";
+                textarea.style.left = "-9999px";
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textarea);
+                button.innerText = "복사 완료";
+            }
+
+            setTimeout(() => {
+                button.innerText = "복사";
+            }, 1500);
+        }
+    </script>
+</body>
+</html>`))
+
+const fallbackIndexHTML = `<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pastebox</title>
+    <style>
+        :root {
+            --focus-ring: #06b6d4;
+        }
+
+        html {
+            box-sizing: border-box;
+        }
+
+        *, *::before, *::after {
+            box-sizing: inherit;
+        }
+
+        html, body {
+            width: 100%;
+            overflow-x: hidden;
+        }
+
+        * {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+        }
+
+        body {
+            background: #1a1a1a;
+            color: #e5e5e5;
+            margin: 0;
+            padding: 0;
+            position: relative;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        :focus-visible {
+            outline: 3px solid var(--focus-ring);
+            outline-offset: 2px;
+        }
+
+        /* Navbar (ROKFOSS Main Style) */
+        .navbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            box-shadow: none !important;
+            border: none !important;
+            padding-bottom: 40px !important;
+            z-index: 1000;
+            background: linear-gradient( to bottom, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.65) 20%, rgba(0, 0, 0, 0.50) 40%, rgba(0, 0, 0, 0.35) 60%, rgba(0, 0, 0, 0.20) 75%, rgba(0, 0, 0, 0.10) 85%, rgba(0, 0, 0, 0.04) 93%, rgba(0, 0, 0, 0) 100% ) !important;
+            transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), background 0.4s ease;
+            padding: 23px !important;
+            transform: translateY(0);
+        }
+
+        .navbar .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: nowrap;
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 1rem;
+        }
+
+        .navbar-brand img {
+            height: 40px;
+        }
+
+        .main-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 140px 20px 80px;
+            box-sizing: border-box;
+        }
+
+        .content-wrapper {
+            max-width: 720px;
+            width: 100%;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 48px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            font-size: 20px;
+            color: #fff;
+            margin-bottom: 2rem;
+        }
+
+        .description {
+            font-size: 16px;
+            line-height: 1.5;
+            color: #e5e5e5;
+            margin-bottom: 2.5rem;
+        }
+
+        .info-section {
+            background-color: #242424;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 32px;
+            text-align: left;
+        }
+
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 0;
+            border-bottom: 0.5px solid rgba(84, 84, 88, 0.4);
+        }
+
+        .info-item:last-child {
+            border-bottom: none;
+            padding-bottom: 0;
+        }
+
+        .info-item:first-child {
+            padding-top: 0;
+        }
+
+        .info-label {
+            font-size: 15px;
+            line-height: 20px;
+            color: rgba(235, 235, 245, 0.6);
+            font-weight: 500;
+            flex-shrink: 0;
+            margin-right: 16px;
+        }
+
+        .info-value {
+            font-size: 14px;
+            line-height: 20px;
+            color: #ffffff;
+            font-weight: 400;
+            text-align: right;
+            font-family: ui-monospace, SFMono-Regular, SF Pro Icons, "SF Mono", Menlo, Monaco, Consolas, monospace;
+            word-break: break-all;
+            white-space: pre-wrap;
+            max-width: 75%;
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 24px;
+            margin-bottom: 32px;
+            justify-content: center;
+        }
+
+        .button {
+            background-color: #242424;
+            color: #ffffff;
+            border: 1px solid rgba(84, 84, 88, 0.4);
+            border-radius: 10px;
+            padding: 12px 24px;
+            font-size: 15px;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.1s;
+            user-select: none;
+        }
+
+        .button:hover {
+            background-color: #2c2c2e;
+        }
+
+        .button:active {
+            transform: scale(0.98);
+        }
+
+        .button-primary {
+            background-color: #ffffff;
+            color: #000000;
+            border: none;
+        }
+
+        .button-primary:hover {
+            background-color: rgba(255, 255, 255, 0.85);
+        }
+
+        .footer-text {
+            font-size: 14px;
+            color: #aaa;
+            margin-top: 2rem;
+            text-align: center;
+        }
+
+        @media (max-width: 768px) {
+            .navbar {
+                padding: 12px 15px !important;
+            }
+
+            .navbar .container {
+                flex-direction: row;
+                align-items: center;
+                gap: 12px;
+            }
+
+            .navbar-brand img {
+                height: 28px;
+            }
+
+            .main-container {
+                padding-top: 120px;
+            }
+
+            .info-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 8px;
+                padding: 12px 0;
+            }
+
+            .info-label {
+                margin-right: 0;
+            }
+
+            .info-value {
+                text-align: left;
+                max-width: 100%;
+                width: 100%;
+                background: rgba(0, 0, 0, 0.25);
+                padding: 10px;
+                border-radius: 6px;
+                font-size: 13px;
+                white-space: nowrap;
+                overflow-x: auto;
+            }
+            
+            .actions {
+                flex-direction: column;
+            }
+            
+            .button {
+                width: 100%;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                animation: none !important;
+                transition: none !important;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <img data-cfasync="false" loading="eager" decoding="async" src="https://cdn.krfoss.org/web/ROKFOSS.png" alt="ROKFOSS">
+            </a>
+        </div>
+    </nav>
+
+    <main id="main" class="main-container" tabindex="-1">
+        <div class="content-wrapper">
+            <h1>PASTEBOX</h1>
+            <p class="subtitle">curl 기반 파일 공유 서비스</p>
+            <p class="description">curl을 사용하여 파일이나 텍스트를 업로드하면 5자리의 무작위 URL이 생성됩니다. 생성된 임시 링크는 30일 후에 자동으로 삭제됩니다.</p>
+
+            <div class="info-section">
+                <div class="info-item">
+                    <span class="info-label">텍스트 업로드</span>
+                    <span class="info-value">echo "hello" | curl -X POST --data-binary @- {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">명령어 출력 업로드</span>
+                    <span class="info-value">ifconfig | curl -X POST --data-binary @- {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">파일 업로드</span>
+                    <span class="info-value">curl -F "file=@test.txt" {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">비밀번호 보호 링크</span>
+                    <span class="info-value">curl -H "usepassword: true" -F "file=@secret.txt" {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">영구 보관</span>
+                    <span class="info-value">curl -H "data-policy: permanent" -F "file=@server-logs.log" {{ .BaseURL }}/</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">만료 정보</span>
+                    <span class="info-value">주소: {{ .BaseURL }}/AbC12
+만료일: 2026-06-24T05:10:26Z
+삭제링크: {{ .BaseURL }}/AbC12?delete=DELETE_TOKEN</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">수동 삭제</span>
+                    <span class="info-value">curl "{{ .BaseURL }}/AbC12?delete=DELETE_TOKEN"</span>
+                </div>
+            </div>
+
+            <div class="actions">
+                <a class="button button-primary" href="/">홈</a>
+                <button class="button" onclick="copyExample(this)">curl 예시 복사</button>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        function copyExample(btn) {
+            const text = 'curl -F "file=@test.txt" {{ .BaseURL }}/';
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = btn.innerText;
+                btn.innerText = "복사 완료";
+                setTimeout(() => {
+                    btn.innerText = originalText;
+                }, 1500);
+            }).catch(err => {
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.style.position = "fixed";
+                textarea.style.left = "-9999px";
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textarea);
+                
+                const originalText = btn.innerText;
+                btn.innerText = "복사 완료";
+                setTimeout(() => {
+                    btn.innerText = originalText;
+                }, 1500);
+            });
+        }
+    </script>
+</body>
+</html>`
+
+func generateRandomToken(length int) (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	result := make([]byte, length)
+	for i := 0; i < length; i++ {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		result[i] = alphabet[n.Int64()]
+	}
+	return string(result), nil
+}
+
+func ensureAdminToken(path string, cfg *config) error {
+	trimmedToken := strings.TrimSpace(cfg.AdminToken)
+	if trimmedToken != "" {
+		cfg.AdminToken = trimmedToken
+		return nil
+	}
+
+	token, err := generateRandomToken(256)
+	if err != nil {
+		return err
+	}
+	cfg.AdminToken = token
+
+	log.Printf("================================================================================\n")
+	log.Printf("새로운 ADMIN_TOKEN이 자동으로 생성되었습니다. 로그인 시 다음 토큰을 사용하십시오:\n%s\n", token)
+	log.Printf("================================================================================\n")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			content := fmt.Sprintf("STORAGE_MODE=%s\nLISTEN_ADDR=%s\nDATA_DIR=%s\nEXPIRE_DAYS=%d\nDB_DSN=%s\nDB_COMPRESSION_ALGORITHM=%s\nADMIN_TOKEN=%s\n",
+				cfg.StorageMode, cfg.ListenAddr, cfg.DataDir, cfg.ExpireDays, cfg.DBDSN, cfg.DBCompress, token)
+			return os.WriteFile(path, []byte(content), 0644)
+		}
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToUpper(trimmed), "ADMIN_TOKEN") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) > 0 {
+				lines[i] = "ADMIN_TOKEN=" + token
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		if len(lines) > 0 && lines[len(lines)-1] != "" {
+			lines = append(lines, "")
+		}
+		lines = append(lines, "ADMIN_TOKEN="+token)
+	}
+
+	newContent := strings.Join(lines, "\n")
+	return os.WriteFile(path, []byte(newContent), 0644)
+}
+
+func (a *app) getStorageModeString() string {
+	switch a.store.(type) {
+	case *pastebox.DBStore:
+		return "db"
+	default:
+		return "local"
+	}
+}
+
+func (a *app) adminHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "허용되지 않은 메서드입니다.", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cookie, err := r.Cookie("admin_token")
+	if err != nil || cookie.Value != a.adminToken || a.adminToken == "" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = adminLoginHTML.Execute(w, map[string]any{
+			"Error": "",
+		})
+		return
+	}
+
+	pastes, err := a.store.List()
+	if err != nil {
+		http.Error(w, "데이터 조회 실패", http.StatusInternalServerError)
+		return
+	}
+
+	var tempCount int
+	for _, p := range pastes {
+		if p.DataPolicy != "permanent" {
+			tempCount++
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = adminDashboardHTML.Execute(w, map[string]any{
+		"Pastes":         pastes,
+		"TemporaryCount": tempCount,
+		"StorageMode":    a.getStorageModeString(),
+	})
+}
+
+func (a *app) adminLoginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "허용되지 않은 메서드입니다.", http.StatusMethodNotAllowed)
+		return
+	}
+
+	token := strings.TrimSpace(r.FormValue("token"))
+	if a.adminToken == "" || token != a.adminToken {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = adminLoginHTML.Execute(w, map[string]any{
+			"Error": "입력하신 토큰이 일치하지 않거나 토큰 정보가 비어있습니다.",
+		})
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "admin_token",
+		Value:    token,
+		Path:     "/ra",
+		HttpOnly: true,
+		MaxAge:   86400,
+	})
+
+	http.Redirect(w, r, "/ra", http.StatusSeeOther)
+}
+
+func (a *app) adminLogoutHandler(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "admin_token",
+		Value:    "",
+		Path:     "/ra",
+		HttpOnly: true,
+		MaxAge:   -1,
+	})
+
+	http.Redirect(w, r, "/ra", http.StatusSeeOther)
+}
+
+func (a *app) adminDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "허용되지 않은 메서드입니다.", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cookie, err := r.Cookie("admin_token")
+	if err != nil || cookie.Value != a.adminToken || a.adminToken == "" {
+		http.Error(w, "권한이 없습니다.", http.StatusUnauthorized)
+		return
+	}
+
+	idsStr := r.FormValue("ids")
+	if idsStr == "" {
+		http.Redirect(w, r, "/ra", http.StatusSeeOther)
+		return
+	}
+
+	ids := strings.Split(idsStr, ",")
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			if err := a.store.ForceDelete(id); err != nil {
+				log.Printf("관리자 강제 삭제 실패 (ID=%s): %v", id, err)
+			}
+		}
+	}
+
+	http.Redirect(w, r, "/ra", http.StatusSeeOther)
+}
+
+func (a *app) adminDeleteAllHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "허용되지 않은 메서드입니다.", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cookie, err := r.Cookie("admin_token")
+	if err != nil || cookie.Value != a.adminToken || a.adminToken == "" {
+		http.Error(w, "권한이 없습니다.", http.StatusUnauthorized)
+		return
+	}
+
+	if err := a.store.DeleteAll(); err != nil {
+		log.Printf("전체 삭제 실패: %v", err)
+		http.Error(w, "전체 삭제 중 오류가 발생했습니다.", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/ra", http.StatusSeeOther)
+}
+
+var adminLoginHTML = template.Must(template.New("admin_login").Parse(`<!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ .ID }} - Pastebox</title>
+  <title>관리자 로그인 - Pastebox</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="min-h-screen bg-[#111111] text-gray-200">
-  <main class="mx-auto max-w-5xl px-4 py-8">
-    <div class="mb-4 flex items-center justify-between gap-4">
-      <h1 class="text-lg font-semibold text-gray-100">Pastebox / {{ .ID }}</h1>
-      <div class="flex items-center gap-2">
-        <button
-          id="copyButton"
-          type="button"
-          class="rounded-xl border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-900"
-          onclick="copyPasteContent()"
-        >
-          복사
-        </button>
-        <a class="rounded-xl border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-900" href="?raw=1">원본</a>
+<body class="min-h-screen bg-[#0d0d0e] text-zinc-100 flex items-center justify-center p-4">
+  <div class="w-full max-w-md bg-zinc-900/60 backdrop-blur-xl border border-zinc-800/80 rounded-2xl p-8 shadow-2xl transition-all duration-300 hover:border-zinc-700/80">
+    <div class="mb-6 text-center">
+      <div class="inline-flex rounded-full bg-amber-500/10 border border-amber-500/20 px-3 py-1 text-xs font-medium text-amber-400 mb-2">
+        관리자 콘솔
+      </div>
+      <h1 class="text-2xl font-bold tracking-tight text-white">Pastebox Admin</h1>
+      <p class="mt-2 text-sm text-zinc-400">대시보드 진입을 위해 256자 토큰을 입력해 주세요.</p>
+    </div>
+
+    {{ if .Error }}
+    <div class="mb-4 rounded-xl bg-red-500/10 border border-red-500/20 p-3 text-xs text-red-400 text-center">
+      {{ .Error }}
+    </div>
+    {{ end }}
+
+    <form action="/ra/login" method="POST" class="space-y-4">
+      <div>
+        <label for="token" class="block text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">Access Token</label>
+        <textarea
+          id="token"
+          name="token"
+          rows="4"
+          required
+          placeholder="256자 토큰을 여기에 붙여넣으세요..."
+          class="w-full rounded-xl border border-zinc-800 bg-zinc-950/80 p-3 text-xs font-mono text-zinc-300 placeholder-zinc-600 focus:border-zinc-700 focus:ring-1 focus:ring-zinc-700 focus:outline-none transition"
+        ></textarea>
+      </div>
+      <button
+        type="submit"
+        class="w-full rounded-xl bg-zinc-100 py-3 font-semibold text-zinc-950 hover:bg-white active:scale-[0.98] transition duration-200"
+      >
+        로그인
+      </button>
+    </form>
+  </div>
+</body>
+</html>`))
+
+var adminDashboardHTML = template.Must(template.New("admin_dashboard").Parse(`<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>관리 대시보드 - Pastebox</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class'
+    }
+  </script>
+</head>
+<body class="dark min-h-screen bg-[#0B0B0C] text-zinc-100 font-sans">
+  <!-- 상단 네비게이션 -->
+  <header class="border-b border-zinc-900 bg-zinc-950/60 backdrop-blur-md sticky top-0 z-50">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <span class="text-xl font-bold tracking-tight text-white">Pastebox <span class="text-zinc-600 font-normal">/ Admin</span></span>
+        <span class="inline-flex items-center rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-xs font-medium text-emerald-400">
+          온라인
+        </span>
+      </div>
+      <div class="flex items-center gap-4">
+        <a href="/" target="_blank" class="text-xs text-zinc-400 hover:text-white transition">사용자 홈 ↗</a>
+        <a href="/ra/logout" class="rounded-xl border border-zinc-800 hover:border-zinc-700 bg-zinc-900 px-3.5 py-1.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-800 transition">
+          로그아웃
+        </a>
       </div>
     </div>
-    <pre id="pasteContent" class="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-gray-800 bg-[#111111] p-5 text-sm leading-6 text-gray-200">{{ .Content }}</pre>
+  </header>
+
+  <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
+    <!-- 정보 카드 섹션 -->
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-8">
+      <div class="rounded-2xl border border-zinc-900 bg-zinc-950/40 p-5 backdrop-blur-sm">
+        <p class="text-xs font-medium text-zinc-500 uppercase tracking-wider">스토리지 상태</p>
+        <p class="mt-2 text-2xl font-bold tracking-tight text-white uppercase">{{ .StorageMode }} Mode</p>
+      </div>
+      <div class="rounded-2xl border border-zinc-900 bg-zinc-950/40 p-5 backdrop-blur-sm">
+        <p class="text-xs font-medium text-zinc-500 uppercase tracking-wider">전체 Paste 개수</p>
+        <p class="mt-2 text-2xl font-bold tracking-tight text-white">{{ len .Pastes }}개</p>
+      </div>
+      <div class="rounded-2xl border border-zinc-900 bg-zinc-950/40 p-5 backdrop-blur-sm">
+        <p class="text-xs font-medium text-zinc-500 uppercase tracking-wider">총 만료 대기</p>
+        <p class="mt-2 text-2xl font-bold tracking-tight text-white">{{ .TemporaryCount }}개</p>
+      </div>
+    </div>
+
+    <!-- 액션 제어 패널 -->
+    <div class="mb-4 flex items-center justify-between gap-4">
+      <div class="flex items-center gap-2">
+        <button
+          onclick="deleteSelected()"
+          class="rounded-xl bg-red-500/10 border border-red-500/20 hover:border-red-500/40 px-3.5 py-2 text-xs font-semibold text-red-400 hover:bg-red-500/20 transition disabled:opacity-50 disabled:pointer-events-none"
+          id="btnDeleteSelected"
+          disabled
+        >
+          선택 삭제
+        </button>
+        <button
+          onclick="confirmDeleteAll()"
+          class="rounded-xl bg-zinc-900 border border-zinc-800 hover:border-red-900/60 px-3.5 py-2 text-xs font-semibold text-zinc-400 hover:text-red-400 hover:bg-red-950/20 transition"
+        >
+          전체 삭제
+        </button>
+      </div>
+      <div class="text-xs text-zinc-500">
+        * 영구 보관 데이터를 포함하여 즉시 파기 가능합니다.
+      </div>
+    </div>
+
+    <!-- 데이터 테이블 -->
+    <div class="overflow-hidden rounded-2xl border border-zinc-900 bg-zinc-950/20 backdrop-blur-sm">
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-zinc-900 text-left text-sm">
+          <thead class="bg-zinc-950/60 text-xs font-semibold text-zinc-400 uppercase tracking-wider">
+            <tr>
+              <th scope="col" class="w-12 px-6 py-4">
+                <input
+                  type="checkbox"
+                  id="selectAll"
+                  onclick="toggleAll(this)"
+                  class="h-4 w-4 rounded border-zinc-800 bg-zinc-900 text-zinc-600 focus:ring-0 focus:ring-offset-0 focus:outline-none"
+                >
+              </th>
+              <th scope="col" class="px-6 py-4">ID / 링크</th>
+              <th scope="col" class="px-6 py-4">콘텐츠 타입</th>
+              <th scope="col" class="px-6 py-4">파일 크기</th>
+              <th scope="col" class="px-6 py-4">보관 정책</th>
+              <th scope="col" class="px-6 py-4">생성일</th>
+              <th scope="col" class="px-6 py-4">만료일</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-zinc-900/60 bg-transparent text-zinc-300">
+            {{ range .Pastes }}
+            <tr class="hover:bg-zinc-900/20 transition-colors">
+              <td class="px-6 py-4">
+                <input
+                  type="checkbox"
+                  name="ids"
+                  value="{{ .ID }}"
+                  onclick="updateSelection()"
+                  class="h-4 w-4 rounded border-zinc-800 bg-zinc-900 text-zinc-600 focus:ring-0 focus:ring-offset-0 focus:outline-none"
+                >
+              </td>
+              <td class="px-6 py-4 font-mono font-medium text-zinc-100">
+                <a href="/{{ .ID }}" target="_blank" class="hover:underline text-zinc-200 hover:text-white transition">
+                  {{ .ID }} ↗
+                </a>
+              </td>
+              <td class="px-6 py-4 text-xs text-zinc-400">{{ .ContentType }}</td>
+              <td class="px-6 py-4 text-xs">{{ .Size }} Bytes</td>
+              <td class="px-6 py-4 text-xs">
+                {{ if eq .DataPolicy "permanent" }}
+                <span class="inline-flex items-center rounded-full bg-purple-500/10 border border-purple-500/20 px-2 py-0.5 text-[10px] font-medium text-purple-400 uppercase">
+                  영구
+                </span>
+                {{ else }}
+                <span class="inline-flex items-center rounded-full bg-zinc-500/10 border border-zinc-800 px-2 py-0.5 text-[10px] font-medium text-zinc-400 uppercase">
+                  임시
+                </span>
+                {{ end }}
+              </td>
+              <td class="px-6 py-4 text-xs text-zinc-500">{{ .CreatedAt.Local.Format "2006-01-02 15:04:05" }}</td>
+              <td class="px-6 py-4 text-xs text-zinc-500">
+                {{ if .ExpiresAt.IsZero }}
+                -
+                {{ else }}
+                {{ .ExpiresAt.Local.Format "2006-01-02 15:04:05" }}
+                {{ end }}
+              </td>
+            </tr>
+            {{ else }}
+            <tr>
+              <td colspan="7" class="px-6 py-12 text-center text-zinc-500 text-xs">
+                업로드된 Paste가 없습니다.
+              </td>
+            </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+    </div>
   </main>
 
+  <!-- 확인 모달 -->
+  <div id="confirmModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+    <div class="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+      <h3 class="text-base font-semibold text-white" id="modalTitle">정말로 삭제하시겠습니까?</h3>
+      <p class="mt-2 text-xs text-zinc-400" id="modalDescription">삭제된 데이터는 절대 복구할 수 없습니다.</p>
+      <div class="mt-6 flex justify-end gap-3">
+        <button
+          onclick="closeModal()"
+          class="rounded-xl bg-zinc-800 border border-zinc-700 px-4 py-2 text-xs font-semibold text-zinc-300 hover:bg-zinc-700 transition"
+        >
+          취소
+        </button>
+        <button
+          id="modalConfirmBtn"
+          class="rounded-xl bg-red-600 hover:bg-red-500 px-4 py-2 text-xs font-semibold text-white transition active:scale-95"
+        >
+          삭제하기
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <form id="actionForm" method="POST" class="hidden">
+    <input type="hidden" id="actionFormIds" name="ids">
+  </form>
+
   <script>
-    async function copyPasteContent() {
-      const button = document.getElementById("copyButton");
-      const content = document.getElementById("pasteContent").innerText;
+    let activeAction = null;
 
-      try {
-        await navigator.clipboard.writeText(content);
-        button.innerText = "복사 완료";
-      } catch (error) {
-        const textarea = document.createElement("textarea");
-        textarea.value = content;
-        textarea.setAttribute("readonly", "");
-        textarea.style.position = "fixed";
-        textarea.style.left = "-9999px";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-        button.innerText = "복사 완료";
+    function toggleAll(master) {
+      const checkboxes = document.getElementsByName('ids');
+      for (let cb of checkboxes) {
+        cb.checked = master.checked;
       }
+      updateSelection();
+    }
 
-      setTimeout(() => {
-        button.innerText = "복사";
-      }, 1500);
+    function updateSelection() {
+      const checkboxes = document.getElementsByName('ids');
+      let count = 0;
+      for (let cb of checkboxes) {
+        if (cb.checked) count++;
+      }
+      const btn = document.getElementById('btnDeleteSelected');
+      btn.disabled = count === 0;
+    }
+
+    function getSelectedIds() {
+      const checkboxes = document.getElementsByName('ids');
+      const ids = [];
+      for (let cb of checkboxes) {
+        if (cb.checked) ids.push(cb.value);
+      }
+      return ids;
+    }
+
+    function deleteSelected() {
+      const ids = getSelectedIds();
+      if (ids.length === 0) return;
+
+      showModal(
+        '선택한 ' + ids.length + '개의 항목을 삭제합니까?',
+        '삭제하면 서버에서 데이터 파일 및 DB 기록이 완전히 지워집니다.',
+        function() {
+          const form = document.getElementById('actionForm');
+          form.action = '/ra/delete';
+          document.getElementById('actionFormIds').value = ids.join(',');
+          form.submit();
+        }
+      );
+    }
+
+    function confirmDeleteAll() {
+      showModal(
+        '서버의 모든 Paste를 삭제합니까?',
+        '경고: 영구 보관 처리된 파일을 포함한 모든 업로드 데이터가 완전히 영구 파기됩니다. 이 작업은 되돌릴 수 없습니다.',
+        function() {
+          const form = document.getElementById('actionForm');
+          form.action = '/ra/delete-all';
+          form.submit();
+        }
+      );
+    }
+
+    function showModal(title, desc, confirmCallback) {
+      document.getElementById('modalTitle').innerText = title;
+      document.getElementById('modalDescription').innerText = desc;
+      const confirmBtn = document.getElementById('modalConfirmBtn');
+      
+      // 기존 이벤트 제거 및 새 이벤트 바인딩
+      const newConfirmBtn = confirmBtn.cloneNode(true);
+      confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
+      
+      newConfirmBtn.addEventListener('click', function() {
+        closeModal();
+        confirmCallback();
+      });
+
+      document.getElementById('confirmModal').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('confirmModal').classList.add('hidden');
     }
   </script>
 </body>
 </html>`))
-
-const fallbackIndexHTML = `<!doctype html>
-<html lang="ko">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pastebox</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="min-h-screen bg-[#111111] text-gray-200">
-  <main class="mx-auto flex min-h-screen max-w-3xl flex-col justify-center px-6">
-    <div class="rounded-2xl border border-gray-800 bg-[#151515] p-8 shadow-2xl">
-      <h1 class="text-3xl font-bold text-white">Pastebox</h1>
-      <p class="mt-3 text-gray-400">curl 기반 파일 공유 서비스</p>
-
-      <div class="mt-8 space-y-4 text-sm">
-        <div class="rounded-xl bg-black/30 p-4">
-          <p class="mb-2 font-semibold text-gray-200">텍스트 업로드</p>
-          <code class="text-gray-300">echo "hello" | curl -X POST --data-binary @- {{ .BaseURL }}/</code>
-        </div>
-
-        <div class="rounded-xl bg-black/30 p-4">
-          <p class="mb-2 font-semibold text-gray-200">파일 업로드</p>
-          <code class="text-gray-300">curl -F "file=@test.txt" {{ .BaseURL }}/</code>
-        </div>
-
-        <div class="rounded-xl bg-black/30 p-4">
-          <p class="mb-2 font-semibold text-gray-200">비밀번호 보호</p>
-          <code class="text-gray-300">curl -H "usepassword: true" -F "file=@secret.txt" {{ .BaseURL }}/</code>
-        </div>
-
-        <div class="rounded-xl bg-black/30 p-4">
-          <p class="mb-2 font-semibold text-gray-200">영구 저장</p>
-          <code class="text-gray-300">curl -H "data-policy: permanent" -F "file=@test.txt" {{ .BaseURL }}/</code>
-        </div>
-      </div>
-    </div>
-  </main>
-</body>
-</html>`
