@@ -639,8 +639,7 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
             border-radius: 10px;
             border: 1px solid rgba(84, 84, 88, 0.2);
             overflow: hidden;
-            max-height: 80vh;
-            height: auto;
+            height: 80vh;
             font-family: ui-monospace, SFMono-Regular, SF Pro Icons, "SF Mono", Menlo, Monaco, Consolas, monospace;
             font-size: 14px;
             line-height: 22px; /* Fixed line height */
