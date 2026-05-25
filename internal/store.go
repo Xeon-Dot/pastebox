@@ -47,7 +47,7 @@ type Metadata struct {
 
 type Entry struct {
 	Meta Metadata
-	File io.ReadCloser
+	File io.ReadSeekCloser
 }
 
 // LocalStore는 로컬 파일 시스템을 사용해 Storage를 구현합니다.
@@ -630,22 +630,44 @@ func compressData(data []byte, algo string) ([]byte, error) {
 	}
 }
 
-func decompressData(data []byte, algo string) (io.ReadCloser, error) {
+type nopReadSeekCloser struct {
+	*bytes.Reader
+}
+
+func (n *nopReadSeekCloser) Close() error {
+	return nil
+}
+
+func NewReadSeekCloser(b []byte) io.ReadSeekCloser {
+	return &nopReadSeekCloser{bytes.NewReader(b)}
+}
+
+func decompressData(data []byte, algo string) (io.ReadSeekCloser, error) {
 	switch strings.ToLower(algo) {
 	case "zstd":
 		reader, err := zstd.NewReader(bytes.NewReader(data))
 		if err != nil {
 			return nil, err
 		}
-		return reader.IOReadCloser(), nil
+		defer reader.Close()
+		decompressed, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, err
+		}
+		return NewReadSeekCloser(decompressed), nil
 	case "gzip":
 		reader, err := gzip.NewReader(bytes.NewReader(data))
 		if err != nil {
 			return nil, err
 		}
-		return reader, nil
+		defer reader.Close()
+		decompressed, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, err
+		}
+		return NewReadSeekCloser(decompressed), nil
 	default:
-		return io.NopCloser(bytes.NewReader(data)), nil
+		return NewReadSeekCloser(data), nil
 	}
 }
 
