@@ -1,7 +1,5 @@
-# Pastebox
+# ROKFOSS Pastebox
 curl 기반 파일 공유 서비스
-
-[English](./README.md) | Korean
 
 ![](./preview.png)
 
@@ -128,3 +126,5 @@ pastebox/
 └── templates/
     └── index.html
 ```
+
+> 원본 저장소: [kmw0410/pastebox](https://github.com/kmw0410/pastebox)
