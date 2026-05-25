@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	pastebox "pastebox/internal"
 )
@@ -423,10 +422,6 @@ func looksLikeText(buf []byte) bool {
 	}
 
 	if bytes.IndexByte(buf, 0) >= 0 {
-		return false
-	}
-
-	if !utf8.Valid(buf) {
 		return false
 	}
 
