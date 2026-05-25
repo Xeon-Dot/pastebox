@@ -1,0 +1,28 @@
+# 컴파일된 실행 파일 및 바이너리
+/pastebox
+/go_bin
+/server
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 로컬 설정 파일 (비밀번호 등 민감정보 보안을 위해 Git 제외)
+config.conf
+
+# 로컬 저장소 데이터 및 임시 파일
+/data/
+/paste-data/
+*.log
+*.tmp
+
+# 개발 도구 및 IDE 설정 파일
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*~

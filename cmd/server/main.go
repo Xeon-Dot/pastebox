@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -19,20 +20,130 @@ import (
 	pastebox "pastebox/internal"
 )
 
+type config struct {
+	StorageMode string
+	ListenAddr  string
+	DataDir     string
+	ExpireDays  int
+	DBDSN       string
+	DBCompress  string
+}
+
+func loadConfig(path string) (*config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	cfg := &config{
+		StorageMode: "local",
+		ListenAddr:  ":8080",
+		DataDir:     "./data",
+		ExpireDays:  30,
+		DBCompress:  "zstd",
+	}
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "//") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.ToUpper(strings.TrimSpace(parts[0]))
+		val := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "STORAGE_MODE":
+			cfg.StorageMode = val
+		case "LISTEN_ADDR":
+			cfg.ListenAddr = val
+		case "DATA_DIR":
+			cfg.DataDir = val
+		case "EXPIRE_DAYS":
+			if days, err := strconv.Atoi(val); err == nil {
+				cfg.ExpireDays = days
+			}
+		case "DB_DSN":
+			cfg.DBDSN = val
+		case "DB_COMPRESSION_ALGORITHM":
+			cfg.DBCompress = val
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
 type app struct {
-	store *pastebox.Store
+	store pastebox.Storage
 	index *template.Template
 }
 
 func main() {
+	// 기본값 설정
 	listenAddr := getenv("LISTEN_ADDR", ":8080")
 	dataDir := getenv("DATA_DIR", "/paste-data")
 	expireDays := getenvInt("EXPIRE_DAYS", 30)
+	storageMode := "local"
+	dbDSN := ""
+	dbCompress := "zstd"
 
-	store, err := pastebox.NewStore(dataDir, time.Duration(expireDays)*24*time.Hour)
-	if err != nil {
-		log.Fatalf("failed to initialize store: %v", err)
+	// config.conf 로드 시도
+	cfg, err := loadConfig("config.conf")
+	if err == nil {
+		if cfg.ListenAddr != "" {
+			listenAddr = cfg.ListenAddr
+		}
+		if cfg.DataDir != "" {
+			dataDir = cfg.DataDir
+		}
+		if cfg.ExpireDays > 0 {
+			expireDays = cfg.ExpireDays
+		}
+		if cfg.StorageMode != "" {
+			storageMode = strings.ToLower(cfg.StorageMode)
+		}
+		dbDSN = cfg.DBDSN
+		if cfg.DBCompress != "" {
+			dbCompress = cfg.DBCompress
+		}
+		log.Println("설정 파일(config.conf)이 성공적으로 로드되었습니다.")
+	} else {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("설정 파일(config.conf) 로드 실패 (환경 변수 모드로 실행): %v", err)
+		} else {
+			log.Println("설정 파일이 발견되지 않아 환경 변수 기반으로 구동합니다.")
+		}
 	}
+
+	var store pastebox.Storage
+	if storageMode == "db" {
+		if dbDSN == "" {
+			log.Fatal("DB 모드 실행을 위해 config.conf 내 DB_DSN 설정이 필요합니다.")
+		}
+		log.Printf("DB 모드로 시작합니다. DSN=%s, 압축=%s", dbDSN, dbCompress)
+		store, err = pastebox.NewDBStore(dbDSN, time.Duration(expireDays)*24*time.Hour, dbCompress)
+		if err != nil {
+			log.Fatalf("DB 연결 및 초기화 실패: %v", err)
+		}
+	} else {
+		log.Printf("로컬 스토리지 모드로 시작합니다. 경로=%s", dataDir)
+		store, err = pastebox.NewLocalStore(dataDir, time.Duration(expireDays)*24*time.Hour)
+		if err != nil {
+			log.Fatalf("로컬 스토리지 초기화 실패: %v", err)
+		}
+	}
+	defer store.Close()
 
 	indexTemplate, err := template.ParseFiles("templates/index.html")
 	if err != nil {
@@ -59,7 +170,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handle)
 
-	log.Printf("pastebox listening on %s, data=%s", listenAddr, dataDir)
+	log.Printf("pastebox listening on %s", listenAddr)
 
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
@@ -74,13 +185,13 @@ func (a *app) handle(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPost, http.MethodPut:
 			a.uploadHandler(w, r)
 		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, "허용되지 않은 메서드입니다.", http.StatusMethodNotAllowed)
 		}
 		return
 	}
 
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "허용되지 않은 메서드입니다.", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -106,7 +217,7 @@ func (a *app) indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.index.Execute(w, data); err != nil {
-		http.Error(w, "template error", http.StatusInternalServerError)
+		http.Error(w, "템플릿 에러", http.StatusInternalServerError)
 	}
 }
 
@@ -116,13 +227,13 @@ func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
-			http.Error(w, "invalid multipart form", http.StatusBadRequest)
+			http.Error(w, "유효하지 않은 multipart 폼입니다.", http.StatusBadRequest)
 			return
 		}
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			http.Error(w, "missing file field", http.StatusBadRequest)
+			http.Error(w, "file 필드가 누락되었습니다.", http.StatusBadRequest)
 			return
 		}
 		defer file.Close()
@@ -149,7 +260,7 @@ func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	meta, password, deleteToken, err := a.store.Create(reader, contentType, usePassword, permanent)
 	if err != nil {
 		log.Printf("upload failed: %v", err)
-		http.Error(w, "upload failed", http.StatusInternalServerError)
+		http.Error(w, "업로드 실패", http.StatusInternalServerError)
 		return
 	}
 
@@ -157,29 +268,29 @@ func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
-	fmt.Fprintf(w, "url: %s\n", url)
+	fmt.Fprintf(w, "주소: %s\n", url)
 
 	if !strings.EqualFold(meta.DataPolicy, "permanent") && !meta.ExpiresAt.IsZero() {
-		fmt.Fprintf(w, "expires: %s\n", meta.ExpiresAt.Format(time.RFC3339))
+		fmt.Fprintf(w, "만료일: %s\n", meta.ExpiresAt.Format(time.RFC3339))
 	}
 
 	if password != "" {
-		fmt.Fprintf(w, "password: %s\n", password)
+		fmt.Fprintf(w, "비밀번호: %s\n", password)
 	}
 
-	fmt.Fprintf(w, "delete: %s?delete=%s\n", url, deleteToken)
+	fmt.Fprintf(w, "삭제링크: %s?delete=%s\n", url, deleteToken)
 }
 
 func (a *app) deleteHandler(w http.ResponseWriter, r *http.Request, id string, token string) {
 	if r.Method == http.MethodHead {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "허용되지 않은 메서드입니다.", http.StatusMethodNotAllowed)
 		return
 	}
 
 	if err := a.store.Delete(id, token); err != nil {
 		if errors.Is(err, pastebox.ErrInvalidDeleteToken) {
 			log.Printf("delete denied: id=%s remote=%s", id, r.RemoteAddr)
-			http.Error(w, "delete token required or invalid", http.StatusUnauthorized)
+			http.Error(w, "삭제 토큰이 누락되었거나 유효하지 않습니다.", http.StatusUnauthorized)
 			return
 		}
 
@@ -190,14 +301,11 @@ func (a *app) deleteHandler(w http.ResponseWriter, r *http.Request, id string, t
 	log.Printf("deleted: id=%s remote=%s", id, r.RemoteAddr)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintln(w, "deleted")
+	fmt.Fprintln(w, "삭제되었습니다.")
 }
 
 func (a *app) viewHandler(w http.ResponseWriter, r *http.Request, id string) {
 	password := r.URL.Query().Get("password")
-	if password == "" {
-		password = r.URL.Query().Get("passsword")
-	}
 	if password == "" {
 		password = r.Header.Get("paste-password")
 	}
@@ -205,7 +313,7 @@ func (a *app) viewHandler(w http.ResponseWriter, r *http.Request, id string) {
 	entry, err := a.store.Open(id, password)
 	if err != nil {
 		if errors.Is(err, pastebox.ErrInvalidPassword) {
-			http.Error(w, "password required or invalid. use ?password=... or paste-password header", http.StatusUnauthorized)
+			http.Error(w, "비밀번호가 필요하거나 유효하지 않습니다. ?password=... 쿼리 파라미터나 paste-password 헤더를 사용하세요.", http.StatusUnauthorized)
 			return
 		}
 		http.NotFound(w, r)
@@ -219,7 +327,7 @@ func (a *app) viewHandler(w http.ResponseWriter, r *http.Request, id string) {
 	if !raw && browser && isTextEntry(entry) {
 		content, err := io.ReadAll(entry.File)
 		if err != nil {
-			http.Error(w, "failed to read file", http.StatusInternalServerError)
+			http.Error(w, "파일 읽기 실패", http.StatusInternalServerError)
 			return
 		}
 
@@ -369,7 +477,7 @@ func getenvInt(key string, fallback int) int {
 }
 
 var pasteViewHTML = template.Must(template.New("paste").Parse(`<!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -387,9 +495,9 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!doctype html>
           class="rounded-xl border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-900"
           onclick="copyPasteContent()"
         >
-          Copy
+          복사
         </button>
-        <a class="rounded-xl border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-900" href="?raw=1">Raw</a>
+        <a class="rounded-xl border border-gray-700 px-3 py-2 text-sm text-gray-300 hover:bg-gray-900" href="?raw=1">원본</a>
       </div>
     </div>
     <pre id="pasteContent" class="overflow-x-auto whitespace-pre-wrap break-words rounded-2xl border border-gray-800 bg-[#111111] p-5 text-sm leading-6 text-gray-200">{{ .Content }}</pre>
@@ -402,7 +510,7 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!doctype html>
 
       try {
         await navigator.clipboard.writeText(content);
-        button.innerText = "Copied";
+        button.innerText = "복사 완료";
       } catch (error) {
         const textarea = document.createElement("textarea");
         textarea.value = content;
@@ -413,11 +521,11 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!doctype html>
         textarea.select();
         document.execCommand("copy");
         document.body.removeChild(textarea);
-        button.innerText = "Copied";
+        button.innerText = "복사 완료";
       }
 
       setTimeout(() => {
-        button.innerText = "Copy";
+        button.innerText = "복사";
       }, 1500);
     }
   </script>
@@ -425,7 +533,7 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!doctype html>
 </html>`))
 
 const fallbackIndexHTML = `<!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -436,26 +544,26 @@ const fallbackIndexHTML = `<!doctype html>
   <main class="mx-auto flex min-h-screen max-w-3xl flex-col justify-center px-6">
     <div class="rounded-2xl border border-gray-800 bg-[#151515] p-8 shadow-2xl">
       <h1 class="text-3xl font-bold text-white">Pastebox</h1>
-      <p class="mt-3 text-gray-400">curl-based file sharing service</p>
+      <p class="mt-3 text-gray-400">curl 기반 파일 공유 서비스</p>
 
       <div class="mt-8 space-y-4 text-sm">
         <div class="rounded-xl bg-black/30 p-4">
-          <p class="mb-2 font-semibold text-gray-200">Upload text</p>
+          <p class="mb-2 font-semibold text-gray-200">텍스트 업로드</p>
           <code class="text-gray-300">echo "hello" | curl -X POST --data-binary @- {{ .BaseURL }}/</code>
         </div>
 
         <div class="rounded-xl bg-black/30 p-4">
-          <p class="mb-2 font-semibold text-gray-200">Upload file</p>
+          <p class="mb-2 font-semibold text-gray-200">파일 업로드</p>
           <code class="text-gray-300">curl -F "file=@test.txt" {{ .BaseURL }}/</code>
         </div>
 
         <div class="rounded-xl bg-black/30 p-4">
-          <p class="mb-2 font-semibold text-gray-200">Password protected</p>
+          <p class="mb-2 font-semibold text-gray-200">비밀번호 보호</p>
           <code class="text-gray-300">curl -H "usepassword: true" -F "file=@secret.txt" {{ .BaseURL }}/</code>
         </div>
 
         <div class="rounded-xl bg-black/30 p-4">
-          <p class="mb-2 font-semibold text-gray-200">Permanent storage</p>
+          <p class="mb-2 font-semibold text-gray-200">영구 저장</p>
           <code class="text-gray-300">curl -H "data-policy: permanent" -F "file=@test.txt" {{ .BaseURL }}/</code>
         </div>
       </div>

@@ -1,8 +1,11 @@
 package internal
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,7 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/klauspost/compress/zstd"
 )
 
 var (
@@ -19,9 +26,12 @@ var (
 	ErrInvalidDeleteToken = errors.New("invalid delete token")
 )
 
-type Store struct {
-	DataDir string
-	TTL     time.Duration
+type Storage interface {
+	Create(r io.Reader, contentType string, usePassword bool, permanent bool) (meta Metadata, password string, deleteToken string, err error)
+	Open(id string, password string) (entry *Entry, err error)
+	Delete(id string, token string) error
+	CleanupExpired() error
+	Close() error
 }
 
 type Metadata struct {
@@ -37,25 +47,40 @@ type Metadata struct {
 
 type Entry struct {
 	Meta Metadata
-	File *os.File
+	File io.ReadCloser
 }
 
-func NewStore(dataDir string, ttl time.Duration) (*Store, error) {
+// LocalStore는 로컬 파일 시스템을 사용해 Storage를 구현합니다.
+type LocalStore struct {
+	DataDir string
+	TTL     time.Duration
+	lockMgr *lockManager
+}
+
+func NewLocalStore(dataDir string, ttl time.Duration) (*LocalStore, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
 	}
 
-	return &Store{
+	return &LocalStore{
 		DataDir: dataDir,
 		TTL:     ttl,
+		lockMgr: newLockManager(),
 	}, nil
 }
 
-func (s *Store) Create(r io.Reader, contentType string, usePassword bool, permanent bool) (Metadata, string, string, error) {
+func (s *LocalStore) Create(r io.Reader, contentType string, usePassword bool, permanent bool) (Metadata, string, string, error) {
 	id, path, err := s.reservePath()
 	if err != nil {
 		return Metadata{}, "", "", err
 	}
+
+	l, release := s.lockMgr.acquire(id)
+	l.mu.Lock()
+	defer func() {
+		l.mu.Unlock()
+		release()
+	}()
 
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
@@ -122,12 +147,23 @@ func (s *Store) Create(r io.Reader, contentType string, usePassword bool, perman
 	return meta, password, deleteToken, nil
 }
 
-func (s *Store) Open(id string, password string) (*Entry, error) {
+func (s *LocalStore) Open(id string, password string) (*Entry, error) {
 	if !validID(id) {
 		return nil, ErrNotFound
 	}
 
 	path := s.path(id)
+
+	l, release := s.lockMgr.acquire(id)
+	l.mu.RLock()
+
+	var unlocked bool
+	defer func() {
+		if !unlocked {
+			l.mu.RUnlock()
+			release()
+		}
+	}()
 
 	meta, err := s.readMetadata(id)
 	if err != nil {
@@ -135,8 +171,16 @@ func (s *Store) Open(id string, password string) (*Entry, error) {
 	}
 
 	if isExpired(meta, time.Now().UTC()) {
-		_ = os.Remove(path)
-		_ = os.Remove(metaPath(path))
+		l.mu.RUnlock()
+		l.mu.Lock()
+		metaDouble, errDouble := s.readMetadata(id)
+		if errDouble == nil && isExpired(metaDouble, time.Now().UTC()) {
+			_ = os.Remove(path)
+			_ = os.Remove(metaPath(path))
+		}
+		l.mu.Unlock()
+		unlocked = true
+		release()
 		return nil, ErrNotFound
 	}
 
@@ -157,7 +201,7 @@ func (s *Store) Open(id string, password string) (*Entry, error) {
 	}, nil
 }
 
-func (s *Store) Delete(id string, token string) error {
+func (s *LocalStore) Delete(id string, token string) error {
 	if !validID(id) {
 		return ErrNotFound
 	}
@@ -166,6 +210,13 @@ func (s *Store) Delete(id string, token string) error {
 	if token == "" {
 		return ErrInvalidDeleteToken
 	}
+
+	l, release := s.lockMgr.acquire(id)
+	l.mu.Lock()
+	defer func() {
+		l.mu.Unlock()
+		release()
+	}()
 
 	path := s.path(id)
 
@@ -192,7 +243,7 @@ func (s *Store) Delete(id string, token string) error {
 	return nil
 }
 
-func (s *Store) CleanupExpired() error {
+func (s *LocalStore) CleanupExpired() error {
 	entries, err := os.ReadDir(s.DataDir)
 	if err != nil {
 		return err
@@ -215,22 +266,28 @@ func (s *Store) CleanupExpired() error {
 			continue
 		}
 
-		meta, err := s.readMetadata(name)
-		if err != nil {
-			continue
-		}
+		l, release := s.lockMgr.acquire(name)
+		l.mu.Lock()
 
-		if isExpired(meta, now) {
+		meta, err := s.readMetadata(name)
+		if err == nil && isExpired(meta, now) {
 			path := s.path(name)
 			_ = os.Remove(path)
 			_ = os.Remove(metaPath(path))
 		}
+
+		l.mu.Unlock()
+		release()
 	}
 
 	return nil
 }
 
-func (s *Store) reservePath() (string, string, error) {
+func (s *LocalStore) Close() error {
+	return nil
+}
+
+func (s *LocalStore) reservePath() (string, string, error) {
 	for i := 0; i < 100; i++ {
 		id, err := randomString(idAlphabet, 5)
 		if err != nil {
@@ -247,11 +304,11 @@ func (s *Store) reservePath() (string, string, error) {
 	return "", "", errors.New("failed to reserve random id")
 }
 
-func (s *Store) path(id string) string {
+func (s *LocalStore) path(id string) string {
 	return filepath.Join(s.DataDir, id)
 }
 
-func (s *Store) writeMetadata(meta Metadata) error {
+func (s *LocalStore) writeMetadata(meta Metadata) error {
 	path := s.path(meta.ID)
 	metaFile := metaPath(path)
 
@@ -269,7 +326,7 @@ func (s *Store) writeMetadata(meta Metadata) error {
 	return os.Rename(tmp, metaFile)
 }
 
-func (s *Store) readMetadata(id string) (Metadata, error) {
+func (s *LocalStore) readMetadata(id string) (Metadata, error) {
 	var meta Metadata
 
 	data, err := os.ReadFile(metaPath(s.path(id)))
@@ -282,6 +339,351 @@ func (s *Store) readMetadata(id string) (Metadata, error) {
 	}
 
 	return meta, nil
+}
+
+// DBStore는 MariaDB(MySQL) 및 압축을 사용해 Storage를 구현합니다.
+type DBStore struct {
+	db           *sql.DB
+	TTL          time.Duration
+	compressAlgo string
+}
+
+func NewDBStore(dsn string, ttl time.Duration, compressAlgo string) (*DBStore, error) {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	db.SetConnMaxLifetime(time.Minute * 3)
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(10)
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	store := &DBStore{
+		db:           db,
+		TTL:          ttl,
+		compressAlgo: strings.ToLower(strings.TrimSpace(compressAlgo)),
+	}
+
+	if err := store.autoMigrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return store, nil
+}
+
+func (s *DBStore) autoMigrate() error {
+	query := `
+	CREATE TABLE IF NOT EXISTS pastes (
+		id VARCHAR(5) PRIMARY KEY,
+		password_hash VARCHAR(64) NULL,
+		delete_token_hash VARCHAR(64) NOT NULL,
+		created_at DATETIME NOT NULL,
+		expires_at DATETIME NULL,
+		data_policy VARCHAR(16) NOT NULL,
+		size BIGINT NOT NULL,
+		content_type VARCHAR(128) NOT NULL,
+		content LONGBLOB NOT NULL,
+		compressed_algo VARCHAR(16) NOT NULL
+	);`
+	if _, err := s.db.Exec(query); err != nil {
+		return err
+	}
+
+	indexQuery := `CREATE INDEX IF NOT EXISTS idx_pastes_expires_at ON pastes(expires_at);`
+	_, _ = s.db.Exec(indexQuery)
+
+	return nil
+}
+
+func (s *DBStore) Create(r io.Reader, contentType string, usePassword bool, permanent bool) (Metadata, string, string, error) {
+	var id string
+	var err error
+	for i := 0; i < 100; i++ {
+		id, err = randomString(idAlphabet, 5)
+		if err != nil {
+			return Metadata{}, "", "", err
+		}
+
+		var exists int
+		err := s.db.QueryRow("SELECT COUNT(*) FROM pastes WHERE id = ?", id).Scan(&exists)
+		if err != nil {
+			return Metadata{}, "", "", err
+		}
+		if exists == 0 {
+			break
+		}
+		if i == 99 {
+			return Metadata{}, "", "", errors.New("failed to reserve random id in DB")
+		}
+	}
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return Metadata{}, "", "", err
+	}
+	size := int64(len(data))
+
+	compressedData, err := compressData(data, s.compressAlgo)
+	if err != nil {
+		return Metadata{}, "", "", err
+	}
+
+	var password string
+	var passwordHash string
+	if usePassword {
+		password, err = generatePassword(8)
+		if err != nil {
+			return Metadata{}, "", "", err
+		}
+		passwordHash = hashSecret(password)
+	}
+
+	deleteToken, err := randomString(tokenAlphabet, 32)
+	if err != nil {
+		return Metadata{}, "", "", err
+	}
+
+	now := time.Now().UTC()
+	dataPolicy := "temporary"
+	expiresAt := now.Add(s.TTL)
+	if permanent {
+		dataPolicy = "permanent"
+		expiresAt = time.Time{}
+	}
+
+	meta := Metadata{
+		ID:              id,
+		PasswordHash:    passwordHash,
+		DeleteTokenHash: hashSecret(deleteToken),
+		CreatedAt:       now,
+		ExpiresAt:       expiresAt,
+		DataPolicy:      dataPolicy,
+		Size:            size,
+		ContentType:     contentType,
+	}
+
+	var expiresAtNull sql.NullTime
+	if !expiresAt.IsZero() {
+		expiresAtNull = sql.NullTime{Time: expiresAt, Valid: true}
+	}
+
+	var dbPassHash sql.NullString
+	if passwordHash != "" {
+		dbPassHash = sql.NullString{String: passwordHash, Valid: true}
+	}
+
+	insertQuery := `
+	INSERT INTO pastes (id, password_hash, delete_token_hash, created_at, expires_at, data_policy, size, content_type, content, compressed_algo)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	_, err = s.db.Exec(insertQuery, id, dbPassHash, meta.DeleteTokenHash, now, expiresAtNull, dataPolicy, size, contentType, compressedData, s.compressAlgo)
+	if err != nil {
+		return Metadata{}, "", "", err
+	}
+
+	return meta, password, deleteToken, nil
+}
+
+func (s *DBStore) Open(id string, password string) (*Entry, error) {
+	if !validID(id) {
+		return nil, ErrNotFound
+	}
+
+	var meta Metadata
+	var dbPassHash sql.NullString
+	var expiresAtNull sql.NullTime
+	var compressedData []byte
+	var algo string
+
+	query := `
+	SELECT id, password_hash, delete_token_hash, created_at, expires_at, data_policy, size, content_type, content, compressed_algo
+	FROM pastes
+	WHERE id = ?`
+
+	err := s.db.QueryRow(query, id).Scan(
+		&meta.ID,
+		&dbPassHash,
+		&meta.DeleteTokenHash,
+		&meta.CreatedAt,
+		&expiresAtNull,
+		&meta.DataPolicy,
+		&meta.Size,
+		&meta.ContentType,
+		&compressedData,
+		&algo,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	if dbPassHash.Valid {
+		meta.PasswordHash = dbPassHash.String
+	}
+	if expiresAtNull.Valid {
+		meta.ExpiresAt = expiresAtNull.Time
+	}
+
+	if isExpired(meta, time.Now().UTC()) {
+		_, _ = s.db.Exec("DELETE FROM pastes WHERE id = ?", id)
+		return nil, ErrNotFound
+	}
+
+	if meta.PasswordHash != "" {
+		if strings.TrimSpace(password) == "" || hashSecret(password) != meta.PasswordHash {
+			return nil, ErrInvalidPassword
+		}
+	}
+
+	rc, err := decompressData(compressedData, algo)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Entry{
+		Meta: meta,
+		File: rc,
+	}, nil
+}
+
+func (s *DBStore) Delete(id string, token string) error {
+	if !validID(id) {
+		return ErrNotFound
+	}
+
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ErrInvalidDeleteToken
+	}
+
+	var deleteTokenHash string
+	err := s.db.QueryRow("SELECT delete_token_hash FROM pastes WHERE id = ?", id).Scan(&deleteTokenHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	if deleteTokenHash == "" || hashSecret(token) != deleteTokenHash {
+		return ErrInvalidDeleteToken
+	}
+
+	_, err = s.db.Exec("DELETE FROM pastes WHERE id = ?", id)
+	return err
+}
+
+func (s *DBStore) CleanupExpired() error {
+	_, err := s.db.Exec("DELETE FROM pastes WHERE expires_at IS NOT NULL AND expires_at < ?", time.Now().UTC())
+	return err
+}
+
+func (s *DBStore) Close() error {
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
+// 압축 및 해제 보조 함수들
+func compressData(data []byte, algo string) ([]byte, error) {
+	switch strings.ToLower(algo) {
+	case "zstd":
+		var buf bytes.Buffer
+		writer, err := zstd.NewWriter(&buf)
+		if err != nil {
+			return nil, err
+		}
+		_, err = writer.Write(data)
+		if err != nil {
+			writer.Close()
+			return nil, err
+		}
+		err = writer.Close()
+		if err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	case "gzip":
+		var buf bytes.Buffer
+		writer := gzip.NewWriter(&buf)
+		_, err := writer.Write(data)
+		if err != nil {
+			writer.Close()
+			return nil, err
+		}
+		err = writer.Close()
+		if err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	default:
+		return data, nil
+	}
+}
+
+func decompressData(data []byte, algo string) (io.ReadCloser, error) {
+	switch strings.ToLower(algo) {
+	case "zstd":
+		reader, err := zstd.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		return reader.IOReadCloser(), nil
+	case "gzip":
+		reader, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		return reader, nil
+	default:
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+}
+
+// LocalStore를 위한 동속성 제어/동기화 구조체
+type keyLock struct {
+	mu     sync.RWMutex
+	refCnt int
+}
+
+type lockManager struct {
+	mu    sync.Mutex
+	locks map[string]*keyLock
+}
+
+func newLockManager() *lockManager {
+	return &lockManager{
+		locks: make(map[string]*keyLock),
+	}
+}
+
+func (lm *lockManager) acquire(key string) (*keyLock, func()) {
+	lm.mu.Lock()
+	l, ok := lm.locks[key]
+	if !ok {
+		l = &keyLock{}
+		lm.locks[key] = l
+	}
+	l.refCnt++
+	lm.mu.Unlock()
+
+	return l, func() {
+		lm.mu.Lock()
+		l.refCnt--
+		if l.refCnt <= 0 {
+			delete(lm.locks, key)
+		}
+		lm.mu.Unlock()
+	}
 }
 
 func isExpired(meta Metadata, now time.Time) bool {
