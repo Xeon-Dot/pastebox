@@ -575,7 +575,7 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
         }
 
         .content-wrapper {
-            max-width: 960px;
+            max-width: 1440px;
             width: 100%;
         }
 
@@ -639,7 +639,8 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
             border-radius: 10px;
             border: 1px solid rgba(84, 84, 88, 0.2);
             overflow: hidden;
-            height: 70vh;
+            max-height: 80vh;
+            height: auto;
             font-family: ui-monospace, SFMono-Regular, SF Pro Icons, "SF Mono", Menlo, Monaco, Consolas, monospace;
             font-size: 14px;
             line-height: 22px; /* Fixed line height */
@@ -647,18 +648,24 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
         }
 
         .line-numbers {
-            padding: 20px 10px 20px 20px;
             background-color: #1e1e1e;
             color: #858585;
-            text-align: right;
             user-select: none;
             border-right: 1px solid rgba(84, 84, 88, 0.2);
-            display: flex;
-            flex-direction: column;
             width: 60px;
             box-sizing: border-box;
             overflow: hidden;
+            position: relative;
+        }
+
+        .line-numbers-viewport {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 20px 10px 20px 20px;
             white-space: pre;
+            text-align: right;
         }
 
         .code-area {
@@ -748,13 +755,15 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
                 </div>
             </div>
             <div class="viewer-container" id="viewerContainer">
-                <div class="line-numbers" id="lineNumbers"></div>
+                <div class="line-numbers">
+                    <div class="line-numbers-viewport" id="lineNumbers"></div>
+                </div>
                 <div class="code-area" id="codeArea">
                     <div class="spacer" id="spacer"></div>
                     <div class="content-viewport" id="contentViewport"></div>
                 </div>
             </div>
-            <script id="pasteData" type="text/plain">{{ .Content }}</script>
+            <div id="pasteData" style="display: none;">{{ .Content }}</div>
         </div>
     </main>
 
