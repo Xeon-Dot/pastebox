@@ -1,5 +1,5 @@
 # ROKFOSS Pastebox
-curl 기반 파일 공유 서비스
+curl 기반 텍스트/로그 공유 서비스
 
 ![](./preview.png)
 
@@ -26,7 +26,7 @@ curl 기반 파일 공유 서비스
    ./pastebox
    ```
    *(또는 docker compose 빌드를 원하시면 `docker compose up -d --build`로 실행할 수 있습니다.)*
-5. `http://localhost:8080`을 브라우저에서 접속하거나 `curl`을 사용하여 파일을 업로드하세요.
+5. `http://localhost:8080`을 브라우저에서 접속하거나 `curl`을 사용하여 텍스트나 로그를 업로드하세요.
 
 ---
 
@@ -40,10 +40,10 @@ STORAGE_MODE=local
 # 서버 대기 주소
 LISTEN_ADDR=:8080
 
-# [Local 모드 전용] 파일이 물리적으로 저장될 경로
+# [Local 모드 전용] 데이터가 물리적으로 저장될 경로
 DATA_DIR=./data
 
-# 임시 파일 자동 만료 기간 (일)
+# 임시 데이터 자동 만료 기간 (일)
 EXPIRE_DAYS=30
 
 # [DB 모드 전용] MariaDB DSN 연결 정보 (자동으로 테이블 생성 및 관리)
@@ -60,7 +60,7 @@ ADMIN_TOKEN=
 
 ### 기능
 
-1. **파일 자동삭제**: 업로드 시점 기준 30일 후 자동삭제 (백그라운드 정리 고루틴 기동)
+1. **데이터 자동삭제**: 업로드 시점 기준 30일 후 자동삭제 (백그라운드 정리 고루틴 기동)
 
 2. **텍스트 업로드**: **echo, cat (cat << EOF)**와 같이 리눅스 명령어와 연계하여 업로드 가능
    ```bash
@@ -72,17 +72,17 @@ ADMIN_TOKEN=
    ifconfig | curl -X POST --data-binary @- http://localhost:8080/
    ```
    
-4. **파일 업로드**: `multipart/form-data` 형식의 파일 업로드 지원
+4. **텍스트 파일 업로드**: `multipart/form-data` 형식의 텍스트 파일 업로드 지원
    ```bash
    curl -F "file=@test.txt" http://localhost:8080/
    ```
 
-5. **비밀번호 링크**: `usepassword: true` 헤더를 사용한 비공개 업로드 링크생성 지원 (헤더 사용시 **영문(대+소문자) + 숫자 + 특수문자** 조합으로 생성된 8자리 비밀번호 발급 및 `?password=...` 혹은 `paste-password: ...` 헤더로 접근 가능)
+5. **비밀번호 링크**: `usepassword: true` 헤더를 사용한 비공개 업로드 링크생성 지원 (헤더 사용시 **영문(대+소문자) + 숫자** 조합으로 생성된 8자리 비밀번호 발급 및 `?password=...` 혹은 `paste-password: ...` 헤더로 접근 가능)
    ```bash
    # 비밀번호 링크 생성:
    curl -H "usepassword: true" -F "file=@secret.txt" http://localhost:8080/
    
-   # 파일 확인:
+   # 데이터 확인:
    curl -H "paste-password: RANDOM_PASSWORD" http://localhost:8080/RANDOM_CODE
 
    curl http://localhost:8080/RANDOM_CODE?password=RANDOM_PASSWORD
