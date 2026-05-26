@@ -917,8 +917,7 @@ func generatePassword(length int) (string, error) {
 	upper := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	lower := "abcdefghijklmnopqrstuvwxyz"
 	digits := "0123456789"
-	special := "!@#$%^&*_-+=?{}[]"
-	all := upper + lower + digits + special
+	all := upper + lower + digits
 
 	result := make([]byte, 0, length)
 
@@ -935,12 +934,6 @@ func generatePassword(length int) (string, error) {
 	result = append(result, a)
 
 	a, err = randomChar(digits)
-	if err != nil {
-		return "", err
-	}
-	result = append(result, a)
-
-	a, err = randomChar(special)
 	if err != nil {
 		return "", err
 	}

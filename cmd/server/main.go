@@ -249,12 +249,15 @@ func (a *app) indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
+	const maxUploadSize = 10 << 20 // 10MB limit
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+
 	var reader io.Reader
 	contentType := r.Header.Get("Content-Type")
 
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
-		if err := r.ParseMultipartForm(64 << 20); err != nil {
-			http.Error(w, "유효하지 않은 multipart 폼입니다.", http.StatusBadRequest)
+		if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+			http.Error(w, "업로드 용량(10MB) 초과 또는 유효하지 않은 요청입니다.", http.StatusBadRequest)
 			return
 		}
 
@@ -280,6 +283,32 @@ func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
 			contentType = "text/plain; charset=utf-8"
 		}
 	}
+
+	buf := make([]byte, 4096)
+	n, err := io.ReadFull(reader, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		http.Error(w, "파일 읽기 중 오류 발생", http.StatusInternalServerError)
+		return
+	}
+
+	isText := false
+	if n == 0 {
+		isText = true
+	} else {
+		detected := http.DetectContentType(buf[:n])
+		if strings.HasPrefix(detected, "text/") || strings.Contains(detected, "json") {
+			isText = true
+		} else {
+			isText = looksLikeText(buf[:n])
+		}
+	}
+
+	if !isText {
+		http.Error(w, "바이너리 파일은 공유할 수 없습니다. 텍스트/로그 데이터만 업로드 가능합니다.", http.StatusBadRequest)
+		return
+	}
+
+	reader = io.MultiReader(bytes.NewReader(buf[:n]), reader)
 
 	usePassword := strings.EqualFold(strings.TrimSpace(r.Header.Get("usepassword")), "true")
 
@@ -751,6 +780,63 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
                 width: 100%;
             }
         }
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            z-index: 2000;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        .modal-content {
+            background: #242424;
+            border: 1px solid rgba(84, 84, 88, 0.4);
+            border-radius: 16px;
+            width: 90%;
+            max-width: 500px;
+            padding: 32px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            transform: scale(0.95);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            text-align: left;
+        }
+
+        .modal-overlay.active .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 16px;
+            margin-top: 0;
+        }
+
+        .modal-body {
+            font-size: 14px;
+            line-height: 1.6;
+            color: rgba(235, 235, 245, 0.8);
+            margin-bottom: 32px;
+        }
+
+        .modal-close {
+            width: 100%;
+        }
     </style>
 </head>
 <body>
@@ -787,11 +873,35 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
                     <div class="content-viewport" id="contentViewport"></div>
                 </div>
             </div>
+            <div class="footer-text">
+                <a href="#" onclick="openToSModal(event)" style="color: inherit; text-decoration: underline; cursor: pointer;">서비스 이용 약관</a>
+            </div>
             <div id="pasteData" style="display: none;">{{ .Content }}</div>
         </div>
     </main>
 
+    <!-- ToS Modal -->
+    <div class="modal-overlay" id="tosModal" onclick="if(event.target===this) closeToSModal()">
+        <div class="modal-content">
+            <h2 class="modal-title">서비스 이용 약관</h2>
+            <div class="modal-body">
+                본 서비스는 임시 텍스트, 코드 및 로그 공유를 목적으로 제공됩니다.<br><br>
+                개인 클라우드 스토리지 용도 등 본래 목적에 어긋나는 악의적인 대용량 데이터 업로드 및 서비스 남용 시, 사전 통보 없이 데이터가 즉시 삭제되거나 서비스 이용이 영구적으로 차단될 수 있습니다.
+            </div>
+            <button class="button modal-close" onclick="closeToSModal()">확인</button>
+        </div>
+    </div>
+
     <script>
+        function openToSModal(e) {
+            e.preventDefault();
+            document.getElementById('tosModal').classList.add('active');
+        }
+
+        function closeToSModal() {
+            document.getElementById('tosModal').classList.remove('active');
+        }
+
         const rawDataEl = document.getElementById('pasteData');
         const rawText = rawDataEl.textContent;
         const lines = rawText.split('\n');
@@ -1123,6 +1233,64 @@ const fallbackIndexHTML = `<!DOCTYPE html>
             }
         }
 
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            z-index: 2000;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        .modal-content {
+            background: #242424;
+            border: 1px solid rgba(84, 84, 88, 0.4);
+            border-radius: 16px;
+            width: 90%;
+            max-width: 500px;
+            padding: 32px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            transform: scale(0.95);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            text-align: left;
+        }
+
+        .modal-overlay.active .modal-content {
+            transform: scale(1);
+        }
+
+        .modal-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 16px;
+            margin-top: 0;
+        }
+
+        .modal-body {
+            font-size: 14px;
+            line-height: 1.6;
+            color: rgba(235, 235, 245, 0.8);
+            margin-bottom: 32px;
+        }
+
+        .modal-close {
+            width: 100%;
+        }
+
         @media (prefers-reduced-motion: reduce) {
             * {
                 animation: none !important;
@@ -1143,8 +1311,8 @@ const fallbackIndexHTML = `<!DOCTYPE html>
     <main id="main" class="main-container" tabindex="-1">
         <div class="content-wrapper">
             <h1>PASTEBOX</h1>
-            <p class="subtitle">curl 기반 파일 공유 서비스</p>
-            <p class="description">curl을 사용하여 파일이나 텍스트를 업로드하면 5자리의 무작위 URL이 생성됩니다. 생성된 임시 링크는 30일 후에 자동으로 삭제됩니다.</p>
+            <p class="subtitle">curl 기반 텍스트/로그 공유 서비스</p>
+            <p class="description">curl을 사용하여 텍스트나 로그를 업로드하면 5자리의 무작위 URL이 생성됩니다. 생성된 임시 링크는 30일 후에 자동으로 삭제됩니다.</p>
 
             <div class="info-section">
                 <div class="info-item">
@@ -1156,7 +1324,7 @@ const fallbackIndexHTML = `<!DOCTYPE html>
                     <span class="info-value">ifconfig | curl -X POST --data-binary @- {{ .BaseURL }}/</span>
                 </div>
                 <div class="info-item">
-                    <span class="info-label">파일 업로드</span>
+                    <span class="info-label">텍스트 파일 업로드</span>
                     <span class="info-value">curl -F "file=@test.txt" {{ .BaseURL }}/</span>
                 </div>
                 <div class="info-item">
@@ -1180,10 +1348,35 @@ const fallbackIndexHTML = `<!DOCTYPE html>
                 <a class="button button-primary" href="/">홈</a>
                 <button class="button" onclick="copyExample(this)">curl 예시 복사</button>
             </div>
+            
+            <div class="footer-text">
+                <a href="#" onclick="openToSModal(event)" style="color: inherit; text-decoration: underline; cursor: pointer;">서비스 이용 약관</a>
+            </div>
         </div>
     </main>
 
+    <!-- ToS Modal -->
+    <div class="modal-overlay" id="tosModal" onclick="if(event.target===this) closeToSModal()">
+        <div class="modal-content">
+            <h2 class="modal-title">서비스 이용 약관</h2>
+            <div class="modal-body">
+                본 서비스는 임시 텍스트, 코드 및 로그 공유를 목적으로 제공됩니다.<br><br>
+                개인 클라우드 스토리지 용도 등 본래 목적에 어긋나는 악의적인 대용량 데이터 업로드 및 서비스 남용 시, 사전 통보 없이 데이터가 즉시 삭제되거나 서비스 이용이 영구적으로 차단될 수 있습니다.
+            </div>
+            <button class="button modal-close" onclick="closeToSModal()">확인</button>
+        </div>
+    </div>
+
     <script>
+        function openToSModal(e) {
+            e.preventDefault();
+            document.getElementById('tosModal').classList.add('active');
+        }
+
+        function closeToSModal() {
+            document.getElementById('tosModal').classList.remove('active');
+        }
+
         function copyExample(btn) {
             const text = 'curl -F "file=@test.txt" {{ .BaseURL }}/';
             navigator.clipboard.writeText(text).then(() => {
