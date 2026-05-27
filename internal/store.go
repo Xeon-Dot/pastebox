@@ -1032,3 +1032,11 @@ func shuffleBytes(data []byte) error {
 
 const idAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 const tokenAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+// AlphanumericAlphabet은 외부에서 사용할 수 있는 영숫자 알파벳입니다.
+const AlphanumericAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+// RandomString은 암호학적으로 안전한 난수 문자열을 생성합니다.
+func RandomString(alphabet string, length int) (string, error) {
+	return randomString(alphabet, length)
+}
