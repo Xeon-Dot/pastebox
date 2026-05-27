@@ -342,7 +342,10 @@ func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	
 	policy := r.Header.Get("data-policy")
 	if policy == "" {
-		policy = r.FormValue("data-policy")
+		policy = r.URL.Query().Get("data-policy")
+	}
+	if policy == "" && r.PostForm != nil {
+		policy = r.PostForm.Get("data-policy")
 	}
 	once := strings.EqualFold(strings.TrimSpace(policy), "once")
 
