@@ -5,6 +5,12 @@ curl 기반 텍스트/로그 공유 서비스
 
 > ROKFOSS Pastebox 관련 문의는 [ROKFOSS 공식 디스코드](https://chat.krfoss.org) 또는 krfoss@krfoss.org 으로 문의하여 주시길 바랍니다. 
 
+## 서비스 주소
+
+[https://paste.krfoss.org](https://paste.krfoss.org)
+
+**서비스 공지는 ROKFOSS 공식 디스코드를 방문하여 확인하실 수 있습니다**
+
 ### 기술 스택
 | 레이어 | 스택 |
 |--------|------|
