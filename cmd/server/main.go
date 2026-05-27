@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	pastebox "pastebox/internal"
@@ -25,13 +26,14 @@ import (
 var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 type config struct {
-	StorageMode string
-	ListenAddr  string
-	DataDir     string
-	ExpireDays  int
-	DBDSN       string
-	DBCompress  string
-	AdminToken  string
+	StorageMode     string
+	ListenAddr      string
+	DataDir         string
+	ExpireDays      int
+	DBDSN           string
+	DBCompress      string
+	AdminToken      string
+	MaxUploadSizeMB int64
 }
 
 func loadConfig(path string) (*config, error) {
@@ -42,11 +44,12 @@ func loadConfig(path string) (*config, error) {
 	defer file.Close()
 
 	cfg := &config{
-		StorageMode: "local",
-		ListenAddr:  ":8080",
-		DataDir:     "./data",
-		ExpireDays:  30,
-		DBCompress:  "zstd",
+		StorageMode:     "local",
+		ListenAddr:      ":8080",
+		DataDir:         "./data",
+		ExpireDays:      30,
+		DBCompress:      "zstd",
+		MaxUploadSizeMB: 10,
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -81,6 +84,10 @@ func loadConfig(path string) (*config, error) {
 			cfg.DBCompress = val
 		case "ADMIN_TOKEN":
 			cfg.AdminToken = val
+		case "MAX_UPLOAD_SIZE_MB":
+			if sz, err := strconv.ParseInt(val, 10, 64); err == nil {
+				cfg.MaxUploadSizeMB = sz
+			}
 		}
 	}
 
@@ -92,10 +99,12 @@ func loadConfig(path string) (*config, error) {
 }
 
 type app struct {
-	store      pastebox.Storage
-	index      *template.Template
-	adminToken string
-	expireDays int
+	store         pastebox.Storage
+	index         *template.Template
+	adminToken    string
+	expireDays    int
+	maxUploadSize int64
+	mu            sync.RWMutex
 }
 
 func main() {
@@ -107,6 +116,7 @@ func main() {
 	dbDSN := ""
 	dbCompress := "zstd"
 	adminToken := ""
+	maxUploadSizeMB := int64(10) // 기본값 10MB
 
 	// config.conf 로드 시도
 	cfg, err := loadConfig("config.conf")
@@ -131,6 +141,9 @@ func main() {
 			log.Printf("ADMIN_TOKEN 파일 기록 실패: %v", err)
 		}
 		adminToken = cfg.AdminToken
+		if cfg.MaxUploadSizeMB > 0 {
+			maxUploadSizeMB = cfg.MaxUploadSizeMB
+		}
 		log.Println("설정 파일(config.conf)이 성공적으로 로드되었습니다.")
 	} else {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -159,16 +172,17 @@ func main() {
 	}
 	defer store.Close()
 
-		indexTemplate, err := template.ParseFiles("templates/index.html")
+	indexTemplate, err := template.ParseFiles("templates/index.html")
 	if err != nil {
 		indexTemplate = template.Must(template.New("index").Parse(fallbackIndexHTML))
 	}
 
 	a := &app{
-		store:      store,
-		index:      indexTemplate,
-		adminToken: adminToken,
-		expireDays: expireDays,
+		store:         store,
+		index:         indexTemplate,
+		adminToken:    adminToken,
+		expireDays:    expireDays,
+		maxUploadSize: maxUploadSizeMB * 1024 * 1024,
 	}
 
 	go func() {
@@ -190,6 +204,7 @@ func main() {
 	mux.HandleFunc("/ra/logout", a.adminLogoutHandler)
 	mux.HandleFunc("/ra/delete", a.adminDeleteHandler)
 	mux.HandleFunc("/ra/delete-all", a.adminDeleteAllHandler)
+	mux.HandleFunc("/ra/limit", a.adminUpdateLimitHandler)
 
 	log.Printf("pastebox listening on %s", listenAddr)
 
@@ -255,8 +270,14 @@ func (a *app) indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *app) getMaxUploadSize() int64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.maxUploadSize
+}
+
 func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
-	const maxUploadSize = 10 << 20 // 10MB limit
+	maxUploadSize := a.getMaxUploadSize()
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 
 	var reader io.Reader
@@ -264,7 +285,7 @@ func (a *app) uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
 		if err := r.ParseMultipartForm(maxUploadSize); err != nil {
-			http.Error(w, "업로드 용량(10MB) 초과 또는 유효하지 않은 요청입니다.", http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("업로드 용량(%.1fMB) 초과 또는 유효하지 않은 요청입니다.", float64(maxUploadSize)/(1024*1024)), http.StatusBadRequest)
 			return
 		}
 
@@ -887,7 +908,11 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
         <div class="content-wrapper">
             <div class="header-section">
                 <h1>Pastebox / {{ .ID }}</h1>
-                <div class="actions">
+                <div class="actions" style="display: flex; align-items: center; gap: 12px;">
+                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 14px; user-select: none; color: #fff;">
+                        <input type="checkbox" id="wordWrapToggle" style="width: 16px; height: 16px;" onchange="handleWordWrapToggle(event)">
+                        <span>자동 줄바꿈</span>
+                    </label>
                     <button
                         id="copyButton"
                         type="button"
@@ -927,6 +952,21 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- Word Wrap Warning Modal -->
+    <div class="modal-overlay" id="wrapWarningModal">
+        <div class="modal-content">
+            <h2 class="modal-title">경고</h2>
+            <div class="modal-body">
+                줄 수가 많습니다 (2,000줄 이상). 자동 줄바꿈을 켜면 전체 내용이 한 번에 렌더링되어 브라우저 성능에 영향을 주거나 멈출 수 있습니다.<br><br>
+                그래도 진행하시겠습니까?
+            </div>
+            <div style="display: flex; gap: 12px; justify-content: flex-end;">
+                <button class="button" onclick="cancelWordWrap()">아니요, 안 할래요</button>
+                <button class="button button-primary" style="background-color: #ef4444; color: white;" onclick="confirmWordWrap()">네, 진행해주세요</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         function openToSModal(e) {
             e.preventDefault();
@@ -956,8 +996,20 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
 
         let detectedLanguage = 'plaintext';
         let languageDetected = false;
+        let wordWrapEnabled = false;
+
+        function detectLang() {
+            if (typeof hljs !== 'undefined' && !languageDetected) {
+                const sampleText = lines.slice(0, 100).join('\n');
+                const result = hljs.highlightAuto(sampleText);
+                detectedLanguage = result.language || 'plaintext';
+                languageDetected = true;
+            }
+        }
 
         function render() {
+            if (wordWrapEnabled) return; // 가상 스크롤 중지
+
             const scrollTop = codeArea.scrollTop;
             const containerHeight = codeArea.clientHeight;
 
@@ -970,21 +1022,12 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
             const visibleLines = lines.slice(startIdx, endIdx);
             const visibleText = visibleLines.join('\n');
             
-            if (typeof hljs !== 'undefined') {
-                if (!languageDetected) {
-                    const sampleText = lines.slice(0, 100).join('\n');
-                    const result = hljs.highlightAuto(sampleText);
-                    detectedLanguage = result.language || 'plaintext';
-                    languageDetected = true;
-                }
-                
-                if (detectedLanguage !== 'plaintext') {
-                    try {
-                        viewport.innerHTML = hljs.highlight(visibleText, { language: detectedLanguage, ignoreIllegals: true }).value;
-                    } catch (e) {
-                        viewport.textContent = visibleText;
-                    }
-                } else {
+            detectLang();
+            
+            if (typeof hljs !== 'undefined' && detectedLanguage !== 'plaintext') {
+                try {
+                    viewport.innerHTML = hljs.highlight(visibleText, { language: detectedLanguage, ignoreIllegals: true }).value;
+                } catch (e) {
                     viewport.textContent = visibleText;
                 }
             } else {
@@ -1005,6 +1048,70 @@ var pasteViewHTML = template.Must(template.New("paste").Parse(`<!DOCTYPE html>
         codeArea.addEventListener('scroll', render);
         window.addEventListener('resize', render);
         render();
+
+        const wrapToggle = document.getElementById('wordWrapToggle');
+        
+        function handleWordWrapToggle(e) {
+            if (e.target.checked) {
+                if (lines.length > 2000) {
+                    e.target.checked = false; // 일단 취소
+                    document.getElementById('wrapWarningModal').classList.add('active');
+                } else {
+                    enableWordWrap();
+                }
+            } else {
+                disableWordWrap();
+            }
+        }
+
+        function cancelWordWrap() {
+            document.getElementById('wrapWarningModal').classList.remove('active');
+            wrapToggle.checked = false;
+        }
+
+        function confirmWordWrap() {
+            document.getElementById('wrapWarningModal').classList.remove('active');
+            wrapToggle.checked = true;
+            setTimeout(enableWordWrap, 50); // 모달 닫히고 렌더링
+        }
+
+        function enableWordWrap() {
+            wordWrapEnabled = true;
+            viewport.style.whiteSpace = 'pre-wrap';
+            viewport.style.wordBreak = 'break-all';
+            viewport.style.transform = 'none';
+            viewport.style.position = 'relative';
+            viewport.style.top = '0';
+            viewport.style.paddingTop = paddingTop + 'px';
+            
+            spacer.style.display = 'none';
+            document.querySelector('.line-numbers').style.display = 'none';
+
+            detectLang();
+            
+            if (typeof hljs !== 'undefined' && detectedLanguage !== 'plaintext') {
+                try {
+                    viewport.innerHTML = hljs.highlight(rawText, { language: detectedLanguage, ignoreIllegals: true }).value;
+                } catch (e) {
+                    viewport.textContent = rawText;
+                }
+            } else {
+                viewport.textContent = rawText;
+            }
+        }
+
+        function disableWordWrap() {
+            wordWrapEnabled = false;
+            viewport.style.whiteSpace = 'pre';
+            viewport.style.wordBreak = 'normal';
+            viewport.style.position = 'absolute';
+            viewport.style.paddingTop = '20px';
+            
+            spacer.style.display = 'block';
+            document.querySelector('.line-numbers').style.display = 'block';
+            
+            render();
+        }
 
         async function copyPasteContent() {
             const button = document.getElementById("copyButton");
@@ -1577,9 +1684,74 @@ func (a *app) adminHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = adminDashboardHTML.Execute(w, map[string]any{
-		"Pastes":      pastes,
-		"StorageMode": a.getStorageModeString(),
+		"Pastes":          pastes,
+		"StorageMode":     a.getStorageModeString(),
+		"CurrentLimitMB":  a.getMaxUploadSize() / (1024 * 1024),
 	})
+}
+
+func (a *app) adminUpdateLimitHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "허용되지 않은 메서드입니다.", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cookie, err := r.Cookie("admin_token")
+	if err != nil || cookie.Value != a.adminToken || a.adminToken == "" {
+		http.Error(w, "권한이 없습니다.", http.StatusUnauthorized)
+		return
+	}
+
+	sizeStr := r.FormValue("size")
+	unit := r.FormValue("unit")
+
+	size, err := strconv.ParseFloat(sizeStr, 64)
+	if err != nil || size <= 0 {
+		http.Error(w, "올바른 용량을 입력하세요.", http.StatusBadRequest)
+		return
+	}
+
+	var multiplier float64
+	switch unit {
+	case "KB":
+		multiplier = 1024
+	case "MB":
+		multiplier = 1024 * 1024
+	case "GB":
+		multiplier = 1024 * 1024 * 1024
+	default:
+		multiplier = 1024 * 1024 // Default to MB
+	}
+
+	newMaxBytes := int64(size * multiplier)
+	newMaxMB := newMaxBytes / (1024 * 1024)
+	if newMaxMB < 1 {
+		newMaxMB = 1
+	}
+
+	a.mu.Lock()
+	a.maxUploadSize = newMaxBytes
+	a.mu.Unlock()
+
+	// Update config.conf
+	cfgData, err := os.ReadFile("config.conf")
+	if err == nil {
+		lines := strings.Split(string(cfgData), "\n")
+		found := false
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(strings.ToUpper(line)), "MAX_UPLOAD_SIZE_MB=") {
+				lines[i] = fmt.Sprintf("MAX_UPLOAD_SIZE_MB=%d", newMaxMB)
+				found = true
+				break
+			}
+		}
+		if !found {
+			lines = append(lines, fmt.Sprintf("MAX_UPLOAD_SIZE_MB=%d", newMaxMB))
+		}
+		_ = os.WriteFile("config.conf", []byte(strings.Join(lines, "\n")), 0644)
+	}
+
+	http.Redirect(w, r, "/ra", http.StatusSeeOther)
 }
 
 func (a *app) adminLoginHandler(w http.ResponseWriter, r *http.Request) {
@@ -1754,7 +1926,7 @@ var adminDashboardHTML = template.Must(template.New("admin_dashboard").Parse(`<!
 
   <main class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
     <!-- 정보 카드 섹션 -->
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 mb-8">
+    <div class="grid grid-cols-1 gap-4 md:grid-cols-3 mb-8">
       <div class="rounded-2xl border border-zinc-900 bg-zinc-950/40 p-5 backdrop-blur-sm">
         <p class="text-xs font-medium text-zinc-500 uppercase tracking-wider">스토리지 상태</p>
         <p class="mt-2 text-2xl font-bold tracking-tight text-white uppercase">{{ .StorageMode }} Mode</p>
@@ -1762,6 +1934,18 @@ var adminDashboardHTML = template.Must(template.New("admin_dashboard").Parse(`<!
       <div class="rounded-2xl border border-zinc-900 bg-zinc-950/40 p-5 backdrop-blur-sm">
         <p class="text-xs font-medium text-zinc-500 uppercase tracking-wider">전체 Paste 개수</p>
         <p class="mt-2 text-2xl font-bold tracking-tight text-white">{{ len .Pastes }}개</p>
+      </div>
+      <div class="rounded-2xl border border-zinc-900 bg-zinc-950/40 p-5 backdrop-blur-sm">
+        <p class="text-xs font-medium text-zinc-500 uppercase tracking-wider mb-2">업로드 용량 제한 설정</p>
+        <form action="/ra/limit" method="POST" class="flex items-center gap-2">
+          <input type="number" name="size" value="{{ .CurrentLimitMB }}" min="1" step="0.1" class="w-20 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-sm text-white outline-none focus:border-zinc-700" required>
+          <select name="unit" class="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-sm text-white outline-none focus:border-zinc-700">
+            <option value="KB">KB</option>
+            <option value="MB" selected>MB</option>
+            <option value="GB">GB</option>
+          </select>
+          <button type="submit" class="rounded-lg bg-zinc-100 hover:bg-white text-black px-3 py-1 text-sm font-semibold transition">적용</button>
+        </form>
       </div>
     </div>
 
