@@ -336,8 +336,6 @@
             </div>
             <div class="footer-text">
                 <a href="#" onclick="openToSModal(event)" style="color: inherit; text-decoration: underline; cursor: pointer;">서비스 이용 약관</a>
-            </div>
-            <div id="pasteData" style="display: none;">{{ .Content }}</div>
         </div>
     </main>
 
@@ -378,9 +376,8 @@
             document.getElementById('tosModal').classList.remove('active');
         }
 
-        const rawDataEl = document.getElementById('pasteData');
-        const rawText = rawDataEl.textContent;
-        const lines = rawText.split('\n');
+        let rawText = '';
+        let lines = [];
 
         const container = document.getElementById('viewerContainer');
         const codeArea = document.getElementById('codeArea');
@@ -392,14 +389,76 @@
         const paddingTop = 20;
         const paddingBottom = 20;
 
-        const totalHeight = lines.length * lineHeight + paddingTop + paddingBottom;
-        spacer.style.height = totalHeight + 'px';
-
         let detectedLanguage = 'plaintext';
         let languageDetected = false;
         let wordWrapEnabled = false;
-        const isSmallFile = lines.length <= 3000;
+        let isSmallFile = true;
         let staticRendered = false;
+
+        async function loadData() {
+            try {
+                const urlParams = new URLSearchParams(window.location.search);
+                const pwd = urlParams.get('password');
+                let fetchUrl = '?raw=1';
+                if (pwd) fetchUrl += '&password=' + encodeURIComponent(pwd);
+                
+                const response = await fetch(fetchUrl);
+                if (!response.ok) {
+                    const errMsg = response.status === 401 ? '비밀번호가 틀렸거나 필요합니다.' : '데이터를 불러오는데 실패했습니다.';
+                    document.getElementById('globalLoader').innerHTML = '<div style="color:white; font-size:20px;">' + errMsg + '</div>';
+                    return;
+                }
+                
+                const cType = response.headers.get('content-type') || '';
+                if (!cType.includes('text/')) {
+                    window.location.replace(fetchUrl);
+                    return;
+                }
+                
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let done = false;
+                let firstChunk = true;
+
+                while (!done) {
+                    const { value, done: readerDone } = await reader.read();
+                    done = readerDone;
+                    if (value) {
+                        const chunk = decoder.decode(value, { stream: true });
+                        rawText += chunk;
+                        lines = rawText.split('\n');
+                        isSmallFile = lines.length <= 3000;
+                        staticRendered = false;
+                        
+                        const totalHeight = lines.length * lineHeight + paddingTop + paddingBottom;
+                        spacer.style.height = totalHeight + 'px';
+                        
+                        render();
+                        
+                        if (firstChunk) {
+                            const gl = document.getElementById('globalLoader');
+                            if (gl) {
+                                gl.style.opacity = '0';
+                                setTimeout(() => gl.style.display = 'none', 400);
+                            }
+                            firstChunk = false;
+                        }
+                    }
+                }
+                
+                lines = rawText.split('\n');
+                isSmallFile = lines.length <= 3000;
+                staticRendered = false;
+                spacer.style.height = (lines.length * lineHeight + paddingTop + paddingBottom) + 'px';
+                render();
+            } catch(e) {
+                console.error(e);
+                document.getElementById('globalLoader').innerHTML = '<div style="color:white; font-size:20px;">네트워크 오류가 발생했습니다.</div>';
+            }
+        }
+
+
+
 
         function detectLang() {
             if (typeof hljs !== 'undefined' && !languageDetected) {
@@ -476,14 +535,8 @@
 
         codeArea.addEventListener('scroll', render);
         window.addEventListener('resize', render);
-        render();
 
-        // 렌더링 완료 후 로딩 화면 제거
-        const gl = document.getElementById('globalLoader');
-        if (gl) {
-            gl.style.opacity = '0';
-            setTimeout(() => gl.style.display = 'none', 400);
-        }
+        loadData();
 
         const wrapToggle = document.getElementById('wordWrapToggle');
         

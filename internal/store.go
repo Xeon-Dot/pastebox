@@ -30,6 +30,7 @@ var (
 type Storage interface {
 	Create(r io.Reader, contentType string, usePassword bool, once bool) (meta Metadata, password string, deleteToken string, err error)
 	Open(id string, password string) (entry *Entry, err error)
+	Stat(id string, password string) (meta Metadata, err error)
 	Delete(id string, token string) error
 	CleanupExpired() error
 	Close() error
@@ -212,6 +213,34 @@ func (s *LocalStore) Open(id string, password string) (*Entry, error) {
 		Meta: meta,
 		File: file,
 	}, nil
+}
+
+func (s *LocalStore) Stat(id string, password string) (Metadata, error) {
+	if !validID(id) {
+		return Metadata{}, ErrNotFound
+	}
+
+	l, release := s.lockMgr.acquire(id)
+	l.mu.RLock()
+	defer release()
+	defer l.mu.RUnlock()
+
+	meta, err := s.readMetadata(id)
+	if err != nil {
+		return Metadata{}, ErrNotFound
+	}
+
+	if isExpired(meta, time.Now().UTC(), s.TTL) {
+		return Metadata{}, ErrNotFound
+	}
+
+	if meta.PasswordHash != "" {
+		if strings.TrimSpace(password) == "" || hashSecret(password) != meta.PasswordHash {
+			return Metadata{}, ErrInvalidPassword
+		}
+	}
+
+	return meta, nil
 }
 
 func (s *LocalStore) Delete(id string, token string) error {
@@ -665,6 +694,57 @@ func (s *DBStore) Open(id string, password string) (*Entry, error) {
 		Meta: meta,
 		File: rc,
 	}, nil
+}
+
+func (s *DBStore) Stat(id string, password string) (Metadata, error) {
+	if !validID(id) {
+		return Metadata{}, ErrNotFound
+	}
+
+	var meta Metadata
+	var dbPassHash sql.NullString
+	var expiresAtNull sql.NullTime
+
+	query := `
+	SELECT id, password_hash, delete_token_hash, created_at, expires_at, data_policy, size, content_type
+	FROM pastes
+	WHERE id = ?`
+
+	err := s.db.QueryRow(query, id).Scan(
+		&meta.ID,
+		&dbPassHash,
+		&meta.DeleteTokenHash,
+		&meta.CreatedAt,
+		&expiresAtNull,
+		&meta.DataPolicy,
+		&meta.Size,
+		&meta.ContentType,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Metadata{}, ErrNotFound
+		}
+		return Metadata{}, err
+	}
+
+	if dbPassHash.Valid {
+		meta.PasswordHash = dbPassHash.String
+	}
+	if expiresAtNull.Valid {
+		meta.ExpiresAt = expiresAtNull.Time
+	}
+
+	if isExpired(meta, time.Now().UTC(), s.TTL) {
+		return Metadata{}, ErrNotFound
+	}
+
+	if meta.PasswordHash != "" {
+		if strings.TrimSpace(password) == "" || hashSecret(password) != meta.PasswordHash {
+			return Metadata{}, ErrInvalidPassword
+		}
+	}
+
+	return meta, nil
 }
 
 func (s *DBStore) Delete(id string, token string) error {

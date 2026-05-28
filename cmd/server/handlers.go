@@ -250,6 +250,36 @@ func (a *app) viewHandler(w http.ResponseWriter, r *http.Request, id string) {
 		password = r.Header.Get("paste-password")
 	}
 
+	raw := r.URL.Query().Get("raw") == "1"
+	browser := isBrowserRequest(r)
+
+	if !raw && browser {
+		meta, err := a.store.Stat(id, password)
+		if err != nil {
+			if errors.Is(err, pastebox.ErrInvalidPassword) {
+				http.Error(w, "비밀번호가 필요하거나 유효하지 않습니다. ?password=... 쿼리 파라미터나 paste-password 헤더를 사용하세요.", http.StatusUnauthorized)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+
+		if meta.PasswordHash != "" || strings.EqualFold(meta.DataPolicy, "once") {
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		} else {
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+
+		_ = a.pasteView.Execute(w, map[string]any{
+			"ID":      meta.ID,
+			"Content": "",
+		})
+		return
+	}
+
 	entry, err := a.store.Open(id, password)
 	if err != nil {
 		if errors.Is(err, pastebox.ErrInvalidPassword) {
@@ -261,26 +291,10 @@ func (a *app) viewHandler(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	defer entry.File.Close()
 
-	raw := r.URL.Query().Get("raw") == "1"
-	browser := isBrowserRequest(r)
-
-	if !raw && browser && isTextEntry(entry) {
-		content, err := io.ReadAll(entry.File)
-		if err != nil {
-			http.Error(w, "파일 읽기 실패", http.StatusInternalServerError)
-			return
-		}
-
-		cleanContent := ansiEscapeRegex.ReplaceAllString(string(content), "")
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-
-		_ = a.pasteView.Execute(w, map[string]any{
-			"ID":      entry.Meta.ID,
-			"Content": cleanContent,
-		})
-		return
+	if entry.Meta.PasswordHash != "" || strings.EqualFold(entry.Meta.DataPolicy, "once") {
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
 	}
 
 	contentType := entry.Meta.ContentType
