@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	pastebox "pastebox/internal"
@@ -20,6 +23,8 @@ func main() {
 	dbCompress := "zstd"
 	adminToken := ""
 	maxUploadSizeMB := int64(10)
+	rateLimitPerSec := getenvFloat("RATE_LIMIT_PER_SEC", 2)
+	rateBurst := getenvFloat("RATE_LIMIT_BURST", 10)
 
 	cfg, err := loadConfig("config.conf")
 	if err == nil {
@@ -45,6 +50,12 @@ func main() {
 		adminToken = cfg.AdminToken
 		if cfg.MaxUploadSizeMB > 0 {
 			maxUploadSizeMB = cfg.MaxUploadSizeMB
+		}
+		if cfg.RateLimitPerSec > 0 {
+			rateLimitPerSec = cfg.RateLimitPerSec
+		}
+		if cfg.RateBurst > 0 {
+			rateBurst = cfg.RateBurst
 		}
 		log.Println("설정 파일(config.conf)이 성공적으로 로드되었습니다.")
 	} else {
@@ -72,7 +83,6 @@ func main() {
 			log.Fatalf("로컬 스토리지 초기화 실패: %v", err)
 		}
 	}
-	defer store.Close()
 
 	indexTemplate, pasteTemplate, adminLoginTemplate, adminDashboardTemplate := loadTemplates()
 
@@ -99,8 +109,10 @@ func main() {
 		}
 	}()
 
+	uploadLimiter := newRateLimiter(rateLimitPerSec, rateBurst)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", a.handle)
+	mux.HandleFunc("/", uploadLimiter.middleware(a.handle))
 	mux.HandleFunc("/ra", a.adminHandler)
 	mux.HandleFunc("/ra/login", a.adminLoginHandler)
 	mux.HandleFunc("/ra/logout", a.adminLogoutHandler)
@@ -110,7 +122,35 @@ func main() {
 
 	log.Printf("pastebox listening on %s", listenAddr)
 
-	if err := http.ListenAndServe(listenAddr, mux); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Addr:         listenAddr,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("서버 시작 실패: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
+	log.Printf("수신된 시그널 %v, 서버를 안전하게 종료합니다...", sig)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("서버 종료 중 오류: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		log.Printf("스토리지 종료 중 오류: %v", err)
+	}
+
+	log.Println("서버가 안전하게 종료되었습니다.")
 }

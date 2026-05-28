@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"net/http"
@@ -8,7 +9,52 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	pastebox "pastebox/internal"
 )
+
+// isAdminAuthenticated는 관리자 쿠키의 토큰을 상수 시간으로 비교하여 인증 여부를 반환합니다.
+func (a *app) isAdminAuthenticated(r *http.Request) bool {
+	if a.adminToken == "" {
+		return false
+	}
+	cookie, err := r.Cookie("admin_token")
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(a.adminToken)) == 1
+}
+
+// setCSRFCookie는 CSRF 토큰을 생성하여 쿠키에 설정하고 토큰 값을 반환합니다.
+func (a *app) setCSRFCookie(w http.ResponseWriter) string {
+	token, err := pastebox.RandomString(pastebox.AlphanumericAlphabet, 32)
+	if err != nil {
+		return ""
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "csrf_token",
+		Value:    token,
+		Path:     "/ra",
+		HttpOnly: false,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   3600,
+	})
+	return token
+}
+
+// validateCSRF는 폼에서 제출된 CSRF 토큰을 쿠키의 토큰과 상수 시간으로 비교합니다.
+func (a *app) validateCSRF(r *http.Request) bool {
+	formToken := r.FormValue("csrf_token")
+	if formToken == "" {
+		return false
+	}
+	cookie, err := r.Cookie("csrf_token")
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(formToken), []byte(cookie.Value)) == 1
+}
 
 func (a *app) adminHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -16,8 +62,7 @@ func (a *app) adminHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookie, err := r.Cookie("admin_token")
-	if err != nil || cookie.Value != a.adminToken || a.adminToken == "" {
+	if !a.isAdminAuthenticated(r) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = a.adminLogin.Execute(w, map[string]any{
 			"Error": "",
@@ -42,10 +87,12 @@ func (a *app) adminHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	csrfToken := a.setCSRFCookie(w)
 	_ = a.adminDashboard.Execute(w, map[string]any{
 		"Pastes":         pastes,
 		"StorageMode":    a.getStorageModeString(),
 		"CurrentLimitMB": a.getMaxUploadSize() / (1024 * 1024),
+		"CSRFToken":      csrfToken,
 	})
 }
 
@@ -55,9 +102,13 @@ func (a *app) adminUpdateLimitHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookie, err := r.Cookie("admin_token")
-	if err != nil || cookie.Value != a.adminToken || a.adminToken == "" {
+	if !a.isAdminAuthenticated(r) {
 		http.Error(w, "권한이 없습니다.", http.StatusUnauthorized)
+		return
+	}
+
+	if !a.validateCSRF(r) {
+		http.Error(w, "CSRF 토큰이 유효하지 않습니다.", http.StatusForbidden)
 		return
 	}
 
@@ -119,7 +170,7 @@ func (a *app) adminLoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token := strings.TrimSpace(r.FormValue("token"))
-	if a.adminToken == "" || token != a.adminToken {
+	if a.adminToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(a.adminToken)) != 1 {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = a.adminLogin.Execute(w, map[string]any{
@@ -133,6 +184,8 @@ func (a *app) adminLoginHandler(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/ra",
 		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   86400,
 	})
 
@@ -145,6 +198,8 @@ func (a *app) adminLogoutHandler(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/ra",
 		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})
 
@@ -157,9 +212,13 @@ func (a *app) adminDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookie, err := r.Cookie("admin_token")
-	if err != nil || cookie.Value != a.adminToken || a.adminToken == "" {
+	if !a.isAdminAuthenticated(r) {
 		http.Error(w, "권한이 없습니다.", http.StatusUnauthorized)
+		return
+	}
+
+	if !a.validateCSRF(r) {
+		http.Error(w, "CSRF 토큰이 유효하지 않습니다.", http.StatusForbidden)
 		return
 	}
 
@@ -188,9 +247,13 @@ func (a *app) adminDeleteAllHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cookie, err := r.Cookie("admin_token")
-	if err != nil || cookie.Value != a.adminToken || a.adminToken == "" {
+	if !a.isAdminAuthenticated(r) {
 		http.Error(w, "권한이 없습니다.", http.StatusUnauthorized)
+		return
+	}
+
+	if !a.validateCSRF(r) {
+		http.Error(w, "CSRF 토큰이 유효하지 않습니다.", http.StatusForbidden)
 		return
 	}
 

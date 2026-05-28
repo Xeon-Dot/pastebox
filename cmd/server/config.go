@@ -2,14 +2,14 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
-	"math/big"
 	"os"
 	"strconv"
 	"strings"
+
+	pastebox "pastebox/internal"
 )
 
 type config struct {
@@ -21,6 +21,8 @@ type config struct {
 	DBCompress      string
 	AdminToken      string
 	MaxUploadSizeMB int64
+	RateLimitPerSec float64
+	RateBurst       float64
 }
 
 func loadConfig(path string) (*config, error) {
@@ -37,6 +39,8 @@ func loadConfig(path string) (*config, error) {
 		ExpireDays:      30,
 		DBCompress:      "zstd",
 		MaxUploadSizeMB: 10,
+		RateLimitPerSec: 2,
+		RateBurst:       10,
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -75,6 +79,14 @@ func loadConfig(path string) (*config, error) {
 			if sz, err := strconv.ParseInt(val, 10, 64); err == nil {
 				cfg.MaxUploadSizeMB = sz
 			}
+		case "RATE_LIMIT_PER_SEC":
+			if v, err := strconv.ParseFloat(val, 64); err == nil && v > 0 {
+				cfg.RateLimitPerSec = v
+			}
+		case "RATE_LIMIT_BURST":
+			if v, err := strconv.ParseFloat(val, 64); err == nil && v > 0 {
+				cfg.RateBurst = v
+			}
 		}
 	}
 
@@ -107,17 +119,18 @@ func getenvInt(key string, fallback int) int {
 	return n
 }
 
-func generateRandomToken(length int) (string, error) {
-	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	result := make([]byte, length)
-	for i := 0; i < length; i++ {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
-		if err != nil {
-			return "", err
-		}
-		result[i] = alphabet[n.Int64()]
+func getenvFloat(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
 	}
-	return string(result), nil
+
+	f, err := strconv.ParseFloat(value, 64)
+	if err != nil || f <= 0 {
+		return fallback
+	}
+
+	return f
 }
 
 func ensureAdminToken(path string, cfg *config) error {
@@ -127,7 +140,7 @@ func ensureAdminToken(path string, cfg *config) error {
 		return nil
 	}
 
-	token, err := generateRandomToken(256)
+	token, err := pastebox.RandomString(pastebox.AlphanumericAlphabet, 256)
 	if err != nil {
 		return err
 	}
@@ -137,6 +150,14 @@ func ensureAdminToken(path string, cfg *config) error {
 	log.Printf("새로운 ADMIN_TOKEN이 자동으로 생성되었습니다. 로그인 시 다음 토큰을 사용하십시오:\n%s\n", token)
 	log.Printf("================================================================================\n")
 
+	if writeErr := persistAdminToken(path, cfg, token); writeErr != nil {
+		log.Printf("경고: ADMIN_TOKEN을 파일에 기록할 수 없습니다 (읽기 전용 환경?). 토큰은 현재 세션에서만 유효합니다: %v", writeErr)
+	}
+
+	return nil
+}
+
+func persistAdminToken(path string, cfg *config, token string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
